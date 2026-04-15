@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+data/*.csv
+data/*.xlsx
+*.pkl
+.env
+listing_test.py
+test.py
+test2.py
+test3.py
