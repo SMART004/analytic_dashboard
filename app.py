@@ -10,16 +10,19 @@ st.set_page_config(
 # Import des pages
 from pages.dashboard import show_dashboard
 from pages.pos_analytic import show_gros_transferts
-from pages.cc_performance import show_performance
+# from pages.cc_performance import show_performance
+from pages.perf import show_performance
 from pages.oos_listing import show_oos_listing
 from pages.settings import show_settings
+from pages.pos_oos import show_pos_oos_listing
+from pages.map import show_pos_map
 
 # Menu latéral
 with st.sidebar:
     selected = option_menu(
         menu_title="Menu Principal",
-        options=["Dashboard", "Analyse Gros Transferts", "Performance Commerciaux", "Listing OOS", "Settings"],
-        icons=["house-fill", "cash-stack", "graph-up-arrow", "box-seam", "gear-fill"],
+        options=["Dashboard", "Analyse Gros Transferts", "Performance Commerciaux", "Listing OOS", "Settings", "Carte"],
+        icons=["house-fill", "cash-stack", "graph-up-arrow", "box-seam", "gear-fill","map-fill"],
         menu_icon="menu-button-wide",
         default_index=0,
         orientation="vertical"
@@ -80,6 +83,8 @@ elif selected == "Analyse Gros Transferts":
 elif selected == "Performance Commerciaux":
     show_performance()
 elif selected == "Listing OOS":
-    show_oos_listing()
+    show_pos_oos_listing()
 elif selected == "Settings":
     show_settings()
+elif selected == "Carte":
+    show_pos_map()

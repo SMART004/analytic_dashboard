@@ -5,11 +5,13 @@ from utils.helpers import load_file, clean_phone, find_amount_column, to_excel
 from utils.plotting import create_gros_transferts_charts
 
 def show_gros_transferts():
-    st.title("🔍 Analyse des Gros Transferts (≥ 40M)")
-    st.markdown("**Transfer_reçu = somme sur From (Transfer envoyé)**")
+    st.title("Analyse des Gros Transferts")
 
     # Récupération de la liste d'exclusion depuis Settings
     exclusion_df = st.session_state.get('exclusion_df')
+    if exclusion_df is None:
+        st.error("Veuillez charger le fichier **D'exclusion** dans Settings")
+        st.stop()
 
     # ===================== SESSION STATE =====================
     if 'gt_targeted' not in st.session_state:
@@ -24,9 +26,9 @@ def show_gros_transferts():
 
     # ===================== ÉTAPE 1 : Identification =====================
     if st.session_state.gt_targeted is None:
-        st.subheader("Étape 1 – Fichiers Caisses + Liste Exclusion")
+        st.subheader("Étape 1 – Fichiers Caisses")
 
-        col1, col2 = st.columns(2)
+        col1, _ = st.columns(2)
         with col1:
             caisse_files = st.file_uploader(
                 "Fichiers transactions CAISSES (Excel ou CSV)",
@@ -35,20 +37,12 @@ def show_gros_transferts():
                 key="caisses_gt"
             )
 
-        # with col2:
-        #     excl_file = st.file_uploader(
-        #         "Fichier liste EXCLUSION (colonne NUM)",
-        #         type=["xlsx", "xls", "csv"],
-        #         key="excl_gt"
-        #     )
-
         if st.button("Identifier les personnes recherchées", type="primary"):
-            if not caisse_files or not exclusion_df:
-                st.error("Veuillez uploader les fichiers caisses et exclusion")
+            if not caisse_files:
+                st.error("Veuillez uploader au moins un fichier de transactions caisses")
                 st.stop()
 
             with st.spinner("Analyse des transactions caisses..."):
-                # Chargement caisses
                 df_list = [load_file(f) for f in caisse_files]
                 df_caisses = pd.concat(df_list, ignore_index=True)
 
@@ -70,8 +64,8 @@ def show_gros_transferts():
                     .reset_index(name='Total_reçu_caisses')
                 )
 
-                # Chargement exclusion
-                df_excl = load_file(exclusion_df)
+                # Exclusion
+                df_excl = exclusion_df.copy()
                 if 'NUM' not in df_excl.columns:
                     st.error("Colonne 'NUM' manquante dans le fichier exclusion")
                     st.stop()
@@ -85,6 +79,10 @@ def show_gros_transferts():
                     (~total_caisses['phone_to'].isin(exclusion_set))
                 ].copy()
 
+                if targeted.empty:
+                    st.warning("Aucune personne ne dépasse le seuil après exclusion.")
+                    st.stop()
+
                 if 'To name' in transfers_caisses.columns:
                     names = transfers_caisses.groupby('phone_to')['To name'].first().reset_index()
                     targeted = targeted.merge(names, on='phone_to', how='left')
@@ -92,18 +90,20 @@ def show_gros_transferts():
                     targeted['To name'] = "Nom non trouvé"
 
                 targeted = targeted.rename(columns={
-                    'phone_to': 'Numéro',
-                    'To name': 'Nom',
+                    'phone_to': 'Numéro du POS',
+                    'To name': 'Nom du POS',
                     'Total_reçu_caisses': 'Total reçu des caisses'
                 })
 
-                # Sauvegarde en session
+                # Réorganisation : Numéro → Nom → Total reçu des caisses
+                targeted = targeted[['Numéro du POS', 'Nom du POS', 'Total reçu des caisses']]
+
                 st.session_state.gt_targeted = targeted
-                st.session_state.gt_targeted_phones = set(targeted['Numéro'])
+                st.session_state.gt_targeted_phones = set(targeted['Numéro du POS'])
                 st.session_state.gt_exclusion_set = exclusion_set
                 st.session_state.gt_amount_col = amount_col
 
-                st.success(f"{len(targeted)} personnes recherchées identifiées")
+                st.success(f"{len(targeted)} POS identifiés")
                 st.rerun()
 
     # ===================== ÉTAPE 2 : Calculs & Graphiques =====================
@@ -148,35 +148,48 @@ def show_gros_transferts():
                 cash_out = df_persons[(df_persons['Type'] == "Cash out") & 
                                      df_persons['phone_to'].isin(targeted_phones)].groupby('phone_to')['Amount_num'].sum()
 
-                transfer_recu = df_persons[(df_persons['Type'] == "Transfer") & 
-                                          df_persons['phone_from'].isin(targeted_phones)].groupby('phone_from')['Amount_num'].sum()
-
                 transfer_remis = df_persons[
                     (df_persons['Type'] == "Transfer") &
                     (df_persons['phone_from'].isin(targeted_phones)) &
                     (df_persons['phone_to'].isin(exclusion_set))
                 ].groupby('phone_from')['Amount_num'].sum()
 
-                transfer_envoye_non_exclu = transfer_recu - transfer_remis.reindex(transfer_recu.index, fill_value=0)
+                # Calcul direct du Transfer envoyé au non exclu
+                transfer_envoye_non_exclu = df_persons[
+                    (df_persons['Type'] == "Transfer") &
+                    (df_persons['phone_from'].isin(targeted_phones)) &
+                    (~df_persons['phone_to'].isin(exclusion_set))
+                ].groupby('phone_from')['Amount_num'].sum()
 
                 # Construction du résultat final
-                result = st.session_state.gt_targeted.set_index('Numéro').copy()
+                result = st.session_state.gt_targeted.set_index('Numéro du POS').copy()
                 result['Cash_In'] = cash_in.reindex(result.index).fillna(0)
-                result['Cash_Out_reçu'] = cash_out.reindex(result.index).fillna(0)
-                result['Transfer_reçu'] = transfer_recu.reindex(result.index).fillna(0)
-                result['Transfer_remis'] = transfer_remis.reindex(result.index).fillna(0)
-                result['Transfer envoyé au non exclu'] = transfer_envoye_non_exclu.reindex(result.index).fillna(0)
+                result['Cash_Out'] = cash_out.reindex(result.index).fillna(0)
+                result['Float up'] = transfer_remis.reindex(result.index).fillna(0)
+                result['Float down'] = transfer_envoye_non_exclu.reindex(result.index).fillna(0)
 
                 result = result.reset_index()
 
-                # ===================== AFFICHAGE =====================
+                # ===================== COLORATION CONDITIONNELLE SANS COLONNE % =====================
                 st.subheader("📊 Résultat Final")
-                numeric_cols = result.select_dtypes(include=['number']).columns.tolist()
 
-                styled_result = result.style.format({col: '{:,.0f}' for col in numeric_cols})
+                def highlight_low_cashin(row):
+                    try:
+                        ratio = row['Cash_In'] / row['Total reçu des caisses']
+                        if ratio <= 0.20:
+                            return ['background-color: #FFCDD2'] * len(row)   # Rouge
+                    except:
+                        pass
+                    return [''] * len(row)
+
+                styled_result = result.style.format({
+                    col: '{:,.0f}' for col in ['Total reçu des caisses', 'Cash_In', 'Cash_Out', 
+                                              'Float up', 'Float down']
+                }).apply(highlight_low_cashin, axis=1)
+
                 st.dataframe(styled_result, use_container_width=True, height=700)
 
-                # Graphiques d'interprétation
+                # Graphiques (correction du nom de colonne)
                 st.subheader("📈 Interprétation Graphique")
                 fig1, fig2 = create_gros_transferts_charts(result)
 
@@ -206,7 +219,6 @@ def show_gros_transferts():
                     mime="text/csv"
                 )
 
-        # Bouton de réinitialisation
         if st.button("🔄 Nouvelle analyse Gros Transferts"):
             for key in ['gt_targeted', 'gt_targeted_phones', 'gt_exclusion_set', 'gt_amount_col']:
                 if key in st.session_state:
