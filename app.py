@@ -15,7 +15,7 @@ from pages.perf import show_performance
 from pages.oos_listing import show_oos_listing
 from pages.settings import show_settings
 from pages.pos_oos import show_pos_oos_listing
-from pages.map import show_pos_map
+# from pages.map import show_pos_map
 
 # Menu latéral
 with st.sidebar:
@@ -86,5 +86,5 @@ elif selected == "Listing OOS":
     show_pos_oos_listing()
 elif selected == "Settings":
     show_settings()
-elif selected == "Carte":
-    show_pos_map()
+# elif selected == "Carte":
+#     show_pos_map()

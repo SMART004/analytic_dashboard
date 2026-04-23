@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 from utils.helpers import load_file, clean_phone, to_excel
+import dataframe_image as dfi
 
 def show_pos_oos_listing():
     st.title("Listing POS OOS")
@@ -230,6 +231,16 @@ def show_pos_oos_listing():
             )
 
             # Export
+            if st.button("📸 Capturer tableau en image"):
+                dfi.export(styled_df, "pos_oos.png", table_conversion="chrome", max_rows=-1)
+
+                with open("pos_oos.png", "rb") as f:
+                    st.download_button(
+                        "Télécharger image",
+                        f,
+                        "POS_OOS.png",
+                        "image/png"
+                    )
             col_e1, col_e2 = st.columns(2)
             excel_data = to_excel(display_df)
             col_e1.download_button("Télécharger EXCEL", excel_data, "POS_OOS_Alert.xlsx",

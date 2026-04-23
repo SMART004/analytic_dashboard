@@ -6,12 +6,14 @@ def show_settings():
     st.title("⚙️ Settings - Configurations")
     st.markdown("**Chargez ici tous les fichiers et configurations de l'application**")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Commerciaux", 
         "Caisses", 
         "Zones", 
         "Maître POS", 
-        "Numéros de Dotation"
+        "Numéros de Dotation",
+        "Masters",
+        "CDS"
     ])
 
     # ===================== ONGLET COMMERCIAUX =====================
@@ -117,6 +119,38 @@ def show_settings():
             st.info("Aucun numéro de dotation configuré pour le moment.")
 
         st.caption("Ces numéros seront utilisés dans la page Performance pour calculer l'heure et le montant de dotation.")
+
+    # ===================== ONGLET Masters =====================
+    with tab6:
+        st.subheader("Fichier Configuration Master")
+        st.markdown("Colonnes attendues : `NUM`, `MASTER`")
+        
+        master_file = st.file_uploader(
+            "Upload Fichier MASTER (Liste d'exclusion)",
+            type=["xlsx", "xls", "csv"],
+            key="master_config"
+        )
+        if master_file:
+            df_master = load_file(master_file)
+            st.session_state.exclusion_master = df_master
+            st.success(f"Fichier Masters chargé ({len(df_master)} lignes)")
+            st.dataframe(df_master.head(10), use_container_width=True)
+    
+    # ===================== ONGLET CDS =====================
+    with tab7:
+        st.subheader("Fichier Configuration CDS")
+        st.markdown("Colonnes attendues : `NUM`, `CDS`")
+        
+        cds_file = st.file_uploader(
+            "Upload Fichier CDS (Liste d'exclusion)",
+            type=["xlsx", "xls", "csv"],
+            key="cds_config"
+        )
+        if cds_file:
+            df_cds = load_file(cds_file)
+            st.session_state.exclusion_cds = df_cds
+            st.success(f"Fichier CDS chargé ({len(df_cds)} lignes)")
+            st.dataframe(df_cds.head(10), use_container_width=True)
 
     st.divider()
     st.info("Tous les fichiers et configurations chargés ici sont disponibles dans les autres pages.")
