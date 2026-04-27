@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 from utils.helpers import load_file, clean_phone, to_excel
 import dataframe_image as dfi
+import os
+import zipfile
 
 def show_pos_oos_listing():
     st.title("Listing POS OOS")
@@ -231,15 +233,59 @@ def show_pos_oos_listing():
             )
 
             # Export
-            if st.button("📸 Capturer tableau en image"):
-                dfi.export(styled_df, "pos_oos.png", table_conversion="chrome", max_rows=-1)
+            # ===================== EXPORT IMAGE PAR BLOCS =====================
 
-                with open("pos_oos.png", "rb") as f:
+            if st.button("📸 Capturer tableau en images (20 lignes par image)"):
+
+                # dossier temporaire
+                export_folder = "exports_pos_oos"
+                os.makedirs(export_folder, exist_ok=True)
+
+                # supprimer anciens fichiers
+                for file in os.listdir(export_folder):
+                    file_path = os.path.join(export_folder, file)
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+
+                # nombre de lignes par image
+                chunk_size = 20
+
+                # ici on utilise perf_display (pas styled_df)
+                total_rows = len(display_df)
+
+                for i in range(0, total_rows, chunk_size):
+                    chunk = display_df.iloc[i:i + chunk_size].copy()
+
+                    # réappliquer le style sur chaque bloc
+                    styled_chunk = styled_df(chunk)
+
+                    file_name = f"pos_oos_part_{(i // chunk_size) + 1}.png"
+                    file_path = os.path.join(export_folder, file_name)
+
+                    dfi.export(
+                        styled_chunk,
+                        file_path,
+                        table_conversion="chrome"
+                    )
+
+                # créer zip
+                zip_path = os.path.join(export_folder, "POS_OOS.zip")
+
+                with zipfile.ZipFile(zip_path, "w") as zipf:
+                    for file in os.listdir(export_folder):
+                        if file.endswith(".png"):
+                            zipf.write(
+                                os.path.join(export_folder, file),
+                                arcname=file
+                            )
+
+                # bouton téléchargement ZIP
+                with open(zip_path, "rb") as f:
                     st.download_button(
-                        "Télécharger image",
+                        "📥 Télécharger toutes les captures (ZIP)",
                         f,
-                        "POS_OOS.png",
-                        "image/png"
+                        "POS_OOS.zip",
+                        "application/zip"
                     )
             col_e1, col_e2 = st.columns(2)
             excel_data = to_excel(display_df)

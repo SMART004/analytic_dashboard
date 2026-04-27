@@ -15,14 +15,15 @@ from pages.perf import show_performance
 from pages.oos_listing import show_oos_listing
 from pages.settings import show_settings
 from pages.pos_oos import show_pos_oos_listing
+from pages.pos_from_night import show_pos_nuit
 # from pages.map import show_pos_map
 
 # Menu latéral
 with st.sidebar:
     selected = option_menu(
         menu_title="Menu Principal",
-        options=["Dashboard", "Analyse Gros Transferts", "Performance Commerciaux", "Listing OOS", "Settings", "Carte"],
-        icons=["house-fill", "cash-stack", "graph-up-arrow", "box-seam", "gear-fill","map-fill"],
+        options=["Dashboard", "Analyse Gros Transferts", "Analyse des POS non Touche", "Performance Commerciaux", "Listing OOS", "Settings"],
+        icons=["house-fill", "cash-stack", "box-seam", "graph-up-arrow", "box-seam", "gear-fill"],
         menu_icon="menu-button-wide",
         default_index=0,
         orientation="vertical"
@@ -80,6 +81,8 @@ if selected == "Dashboard":
     show_dashboard()
 elif selected == "Analyse Gros Transferts":
     show_gros_transferts()
+elif selected == "Analyse des POS non Touche":
+    show_pos_nuit()
 elif selected == "Performance Commerciaux":
     show_performance()
 elif selected == "Listing OOS":

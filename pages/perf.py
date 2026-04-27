@@ -18,125 +18,243 @@ def format_amount(x):
         return f"{int(x)}"
     
 def style_perf(df):
-    return (
+    def parse_time(val):
+        try:
+            if pd.isna(val) or val == "N/A":
+                return None
+            return pd.to_datetime(str(val), format="%H:%M")
+        except:
+            return None
+
+    def color_heure_debut(val):
+        t = parse_time(val)
+        if t is None:
+            return ""
+
+        minutes = t.hour * 60 + t.minute
+
+        # 00:00 → 07:30 = vert
+        if minutes <= (7 * 60 + 30):
+            return "background-color: #d8f3dc; color: black;"
+
+        # 07:31 → 07:59 = jaune
+        elif minutes <= (7 * 60 + 59):
+            return "background-color: #fff3bf; color: black;"
+
+        # 08:00+ = rouge
+        else:
+            return "background-color: #ffd6d6; color: black;"
+
+    def color_heure_fin(val):
+        t = parse_time(val)
+        if t is None:
+            return ""
+
+        minutes = t.hour * 60 + t.minute
+
+        # 00:00 → 14:59 = rouge
+        if minutes < (15 * 60):
+            return "background-color: #ffd6d6; color: black;"
+
+        # 15:00 → 16:59 = jaune
+        elif minutes < (17 * 60):
+            return "background-color: #fff3bf; color: black;"
+
+        # 17:00+ = vert
+        else:
+            return "background-color: #d8f3dc; color: black;"
+
+    def color_serve_20(val):
+        try:
+            v = float(val)
+
+            if v < 10:
+                return "background-color: #ffd6d6;"
+            elif v < 20:
+                return "background-color: #fff3bf;"
+            else:
+                return "background-color: #d8f3dc;"
+        except:
+            return ""
+
+    def color_serve_5(val):
+        try:
+            v = float(val)
+
+            if v < 2:
+                return "background-color: #ffd6d6;"
+            elif v < 5:
+                return "background-color: #fff3bf;"
+            else:
+                return "background-color: #d8f3dc;"
+        except:
+            return ""
+
+    def icon_sum_pos(val):
+        try:
+            v = float(val)
+
+            if v < 20:
+                return "❌ " + str(int(v))
+            elif v < 40:
+                return "⚠️ " + str(int(v))
+            else:
+                return "✅ " + str(int(v))
+        except:
+            return val
+
+    def icon_tr(val):
+        try:
+            v = float(str(val).replace("%", "").strip())
+
+            if 30 <= v <= 69:
+                return f"❌ {v:.1f}%"
+            elif 70 <= v <= 99:
+                return f"⚠️ {v:.1f}%"
+            elif v >= 100:
+                return f"✅ {v:.1f}%"
+            else:
+                return f"{v:.1f}%"
+        except:
+            return val
+        
+    def triangle_new(val):
+        try:
+            v = float(val)
+
+            # si au moins 1 nouveau client → triangle positif
+            if v >= 1:
+                return f"🟢 {int(v)}"
+
+            # si 0 nouveau client → triangle négatif
+            else:
+                return f"🟠 {int(v)}"
+
+        except:
+            return val
+
+    # ===================== transformation affichage =====================
+
+    df = df.copy()
+
+    # Σ_POS Serve → icônes
+    df[("All segment", "Σ_POS Serve")] = df[
+        ("All segment", "Σ_POS Serve")
+    ].apply(icon_sum_pos)
+
+    df[("TREND [14H→17H]","New")]=df[
+        ("TREND [14H→17H]","New")
+    ].apply(triangle_new)
+
+    # TR → icônes
+    for col in [
+        ("HVC", "TR_HVC"),
+        ("Others", "TR_Other"),
+        ("All segment", "TR General")
+    ]:
+        df[col] = df[col].apply(icon_tr)
+
+    # ===================== style =====================
+
+    styled = (
         df.style
+        .applymap(
+            color_heure_debut,
+            subset=[
+                ("Dotations", "Heure"),
+                ("Transactions (Transfert)", "Première")
+            ]
+        )
+        .applymap(
+            color_heure_fin,
+            subset=[
+                ("Transactions (Transfert)", "Dernière")
+            ]
+        )
+        .applymap(
+            color_serve_20,
+            subset=[
+                ("HVC", "HVC_Serve"),
+                ("Others", "Other_Serve")
+            ]
+        )
+        .applymap(
+            color_serve_5,
+            subset=[
+                ("TREND [14H→17H]", "POS_serve")
+            ]
+        )
         .set_table_styles([
-            # ==============================
-            # STYLE GLOBAL
-            # ==============================
             {
                 "selector": "th",
                 "props": [
                     ("background-color", "black"),
-                    ("color", "gold"),
+                    ("color", "#f1c40f"),
                     ("font-weight", "bold"),
                     ("text-align", "center"),
-                    ("border", "1px solid #666")
+                    ("border", "1px solid #444")
                 ]
+            },
+            # Dotations
+            {
+                "selector": "th.col3, td.col3",
+                "props": [("border-left", "4px solid #FFD966")]
+            },
+            {
+                "selector": "th.col4, td.col4",
+                "props": [("border-right", "4px solid #FFD966")]
+            },
+
+            # HVC
+            {
+                "selector": "th.col8, td.col8",
+                "props": [("border-left", "4px solid #FFD966")]
+            },
+            {
+                "selector": "th.col10, td.col10",
+                "props": [("border-right", "4px solid #FFD966")]
+            },
+
+            # Others
+            {
+                "selector": "th.col11, td.col11",
+                "props": [("border-left", "4px solid #FFD966")]
+            },
+            {
+                "selector": "th.col13, td.col13",
+                "props": [("border-right", "4px solid #FFD966")]
+            },
+
+            # All segment
+            {
+                "selector": "th.col14, td.col14",
+                "props": [("border-left", "4px solid #FFD966")]
+            },
+            {
+                "selector": "th.col16, td.col16",
+                "props": [("border-right", "4px solid #FFD966")]
+            },
+
+            # Trend
+            {
+                "selector": "th.col17, td.col17",
+                "props": [("border-left", "4px solid #FFD966")]
+            },
+            {
+                "selector": "th.col18, td.col18",
+                "props": [("border-right", "4px solid #FFD966")]
             },
             {
                 "selector": "td",
                 "props": [
                     ("text-align", "center"),
-                    ("border", "1px solid #999")
+                    ("border", "1px solid #ddd")
                 ]
-            },
-
-            # -------------------
-            # DOTATIONS
-            # col3 -> Heure
-            # col4 -> Montant
-            # -------------------
-            {
-                "selector": "th.col3, td.col3",
-                "props": [
-                    ("border-left", "4px solid #FFD966")
-                ]
-            },
-            {
-                "selector": "th.col4, td.col4",
-                "props": [
-                    ("border-right", "4px solid #FFD966")
-                ]
-            },
-
-            # -------------------
-            # HVC
-            # col8 -> FD_HVC
-            # col10 -> TR_HVC
-            # -------------------
-            {
-                "selector": "th.col8, td.col8",
-                "props": [
-                    ("border-left", "4px solid #FFD966")
-                ]
-            },
-            {
-                "selector": "th.col10, td.col10",
-                "props": [
-                    ("border-right", "4px solid #FFD966")
-                ]
-            },
-
-            # -------------------
-            # OTHERS
-            # col11 -> FD_Others
-            # col13 -> TR_Other
-            # -------------------
-            {
-                "selector": "th.col11, td.col11",
-                "props": [
-                    ("border-left", "4px solid #FFD966")
-                ]
-            },
-            {
-                "selector": "th.col13, td.col13",
-                "props": [
-                    ("border-right", "4px solid #FFD966")
-                ]
-            },
-
-            # -------------------
-            # ALL SEGMENT
-            # col14 -> Σ_FD
-            # col16 -> TR General
-            # -------------------
-            {
-                "selector": "th.col14, td.col14",
-                "props": [
-                    ("border-left", "4px solid #FFD966")
-                ]
-            },
-            {
-                "selector": "th.col16, td.col16",
-                "props": [
-                    ("border-right", "4px solid #FFD966")
-                ]
-            },
-
-            # -------------------
-            # TREND
-            # col17 -> POS_serve
-            # col18 -> New
-            # -------------------
-            {
-                "selector": "th.col17, td.col17",
-                "props": [
-                    ("border-left", "4px solid #FFD966")
-                ]
-            },
-            {
-                "selector": "th.col18, td.col18",
-                "props": [
-                    ("border-right", "4px solid #FFD966")
-                ]
-            },
+            }
         ])
-        .set_properties(**{
-            "font-size": "13px",
-            "text-align": "center"
-        })
     )
+
+    return styled
 
 def show_performance():
     st.title("📈 Performance Commerciaux")
@@ -606,225 +724,100 @@ def show_performance():
 
         st.dataframe(styled_df, use_container_width=True, height=650)
 
-        # ===================== RADAR CHARTS =====================
-        st.subheader("📡 Radar Performance Commercial")
+        # ===================== TOP 10 COMMERCIAUX =====================
+        st.subheader("🏆 Top 10 Commerciaux")
 
-        # --------------------------------------------------
-        # FILTRE Zone_SA (une seule)
-        # --------------------------------------------------
-        zone_sa_list = sorted(
-            perf['Zone_SA'].dropna().unique().tolist()
+        # Filtre Zone_SA
+        zone_sa_list = ["Toutes"] + sorted(
+            perf['Zone_SA'].dropna().astype(str).unique().tolist()
         )
 
         selected_zone_sa = st.selectbox(
-            "Choisir une Zone_SA",
+            "Filtrer par Zone_SA",
             zone_sa_list,
-            key="radar_zone_sa"
+            key="top10_zone_sa"
         )
 
-        perf_radar = perf[
-            perf['Zone_SA'] == selected_zone_sa
-        ].copy()
+        top_perf = perf.copy()
 
-        # --------------------------------------------------
-        # FILTRE Commercial (un seul)
-        # --------------------------------------------------
-        commercial_list = sorted(
-            perf_radar['Nom_Ccial'].dropna().unique().tolist()
+        if selected_zone_sa != "Toutes":
+            top_perf = top_perf[
+                top_perf['Zone_SA'] == selected_zone_sa
+            ].copy()
+
+        # Conversion propre de TR_General (retirer %)
+        top_perf['TR_General_num'] = (
+            top_perf['TR_General']
+            .astype(str)
+            .str.replace('%', '', regex=False)
         )
 
-        selected_commercial = st.selectbox(
-            "Choisir un Commercial",
-            commercial_list,
-            key="radar_commercial"
+        top_perf['TR_General_num'] = pd.to_numeric(
+            top_perf['TR_General_num'],
+            errors='coerce'
+        ).fillna(0)
+
+        top_perf['Σ_POS_Serve'] = pd.to_numeric(
+            top_perf['Σ_POS_Serve'],
+            errors='coerce'
+        ).fillna(0)
+
+        top_perf['HVC_Serve'] = pd.to_numeric(
+            top_perf['HVC_Serve'],
+            errors='coerce'
+        ).fillna(0)
+
+        # Tri Top 10
+        top_perf = top_perf.sort_values(
+            by=[
+                'HVC_Serve',
+                'TR_General_num',
+                'Σ_POS_Serve'
+            ],
+            ascending=False
+        ).head(10).copy()
+
+        # Rang + Médailles
+        medals = {
+            1: "🥇",
+            2: "🥈",
+            3: "🥉"
+        }
+
+        top_perf = top_perf.reset_index(drop=True)
+        top_perf['Rang'] = top_perf.index + 1
+
+        top_perf['Classement'] = top_perf['Rang'].apply(
+            lambda x: f"{medals.get(x, '')} {x}"
         )
 
-        perf_radar = perf_radar[
-            perf_radar['Nom_Ccial'] == selected_commercial
-        ].copy()
+        # Tableau final
+        top10_display = top_perf[[
+            'Classement',
+            'Nom_Ccial',
+            'Zone_SA',
+            'Premiere_Trans',
+            'HVC_Serve',
+            'Σ_POS_Serve',
+            'TR_General'
+        ]].rename(columns={
+            'Classement': '🏅 Rang',
+            'Nom_Ccial': 'Commercial',
+            'Zone_SA': 'Zone_SA',
+            'Premiere_Trans': 'Première Transaction',
+            'HVC_Serve': 'HVC_Serve',
+            'Σ_POS_Serve': 'Σ_POS_Serve',
+            'TR_General': 'TR_General'
+        })
 
-        # --------------------------------------------------
-        # Fonction conversion montant formaté -> numérique
-        # --------------------------------------------------
-        def clean_amount(x):
-            if pd.isna(x):
-                return 0
+        st.dataframe(
+            top10_display,
+            use_container_width=True,
+            height=450
+        )
 
-            if isinstance(x, str):
-                x = x.strip()
 
-                # ex: 3.5M -> 3500000
-                if "M" in x:
-                    try:
-                        return float(x.replace("M", "").replace(",", "").strip()) * 1_000_000
-                    except:
-                        return 0
-
-                # ex: 850K -> 850000
-                if "K" in x:
-                    try:
-                        return float(x.replace("K", "").replace(",", "").strip()) * 1_000
-                    except:
-                        return 0
-
-                try:
-                    return float(x.replace(",", ""))
-                except:
-                    return 0
-
-            return x
-
-        # --------------------------------------------------
-        # Si données disponibles
-        # --------------------------------------------------
-        if not perf_radar.empty:
-
-            # ==================================================
-            # RADAR 1 : FINANCIER
-            # ==================================================
-            financial_data = {
-                "Dotation": perf_radar["Montant_Dotation"].apply(clean_amount).sum(),
-                "FD_HVC": perf_radar["FD_HVC"].apply(clean_amount).sum(),
-                "FD_Others": perf_radar["FD_Others"].apply(clean_amount).sum(),
-                "Σ_FD": perf_radar["Σ_FD"].apply(clean_amount).sum(),
-            }
-
-            financial_categories = list(financial_data.keys())
-            financial_values = list(financial_data.values())
-
-            # fermeture radar
-            financial_categories += financial_categories[:1]
-            financial_values += financial_values[:1]
-
-            fig_financial = go.Figure()
-
-            fig_financial.add_trace(go.Scatterpolar(
-                r=financial_values,
-                theta=financial_categories,
-                fill='toself',
-                name=selected_commercial
-            ))
-
-            fig_financial.update_layout(
-                title=f"Radar Financier — {selected_commercial}",
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True
-                    )
-                ),
-                showlegend=False
-            )
-
-            st.plotly_chart(fig_financial, use_container_width=True)
-
-            # ==================================================
-            # RADAR 2 : ACTIVITÉ
-            # ==================================================
-            activity_data = {
-                "HVC_Serve": pd.to_numeric(
-                    perf_radar["HVC_Serve"],
-                    errors="coerce"
-                ).fillna(0).sum(),
-
-                "Other_Serve": pd.to_numeric(
-                    perf_radar["Other_Serve"],
-                    errors="coerce"
-                ).fillna(0).sum(),
-
-                "Σ_POS_Serve": pd.to_numeric(
-                    perf_radar["Σ_POS_Serve"],
-                    errors="coerce"
-                ).fillna(0).sum(),
-
-                "POS_serve": pd.to_numeric(
-                    perf_radar["POS_serve"],
-                    errors="coerce"
-                ).fillna(0).sum(),
-
-                "New": pd.to_numeric(
-                    perf_radar["New"],
-                    errors="coerce"
-                ).fillna(0).sum(),
-
-                "Nb_Transactions": pd.to_numeric(
-                    perf_radar["Nb_Transactions"],
-                    errors="coerce"
-                ).fillna(0).sum(),
-            }
-
-            activity_categories = list(activity_data.keys())
-            activity_values = list(activity_data.values())
-
-            # fermeture radar
-            activity_categories += activity_categories[:1]
-            activity_values += activity_values[:1]
-
-            fig_activity = go.Figure()
-
-            fig_activity.add_trace(go.Scatterpolar(
-                r=activity_values,
-                theta=activity_categories,
-                fill='toself',
-                name=selected_commercial
-            ))
-
-            fig_activity.update_layout(
-                title=f"Radar Activité — {selected_commercial}",
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True
-                    )
-                ),
-                showlegend=False
-            )
-
-            st.plotly_chart(fig_activity, use_container_width=True)
-
-        else:
-            st.warning("Aucune donnée disponible pour ce commercial.")
-
-        # ===================== DEBUG DOTATION =====================
-        # st.subheader("🔍 Analyse des dotations élevées (>4M)")
-
-        # alert_commerciaux = perf[perf['Montant_Dotation_raw'] > 4_000_000]['Nom_Ccial'].unique()
-
-        # if len(alert_commerciaux) > 0:
-
-        #     selected_ccial = st.selectbox(
-        #         "Choisir un commercial",
-        #         alert_commerciaux
-        #     )
-
-        #     selected_date = st.selectbox(
-        #         "Choisir une date",
-        #         perf[perf['Nom_Ccial'] == selected_ccial]['Date'].unique()
-        #     )
-
-        #     debug_df = dotation_trans[
-        #         (dotation_trans['Nom_Ccial'] == selected_ccial) &
-        #         (dotation_trans['Date_only'] == selected_date)
-        #     ].sort_values('Date')
-
-        #     debug_df['Type_Source'] = debug_df['From_clean'].apply(
-        #         lambda x: "MASTER" if x in masters_excl else "CAISSE"
-        #     )
-
-        #     st.write("### 📊 Transactions de dotation")
-        #     st.dataframe(debug_df)
-
-        #     st.write("### 💰 Somme totale")
-        #     st.write(debug_df['Amount'].sum())
-
-        #     st.write("### 🔎 Répartition")
-        #     st.write(debug_df.groupby('Type_Source')['Amount'].sum())
-
-        #     st.write("### 🔢 Nombre de transactions")
-        #     st.write(len(debug_df))
-
-        # else:
-        #     st.success("✅ Aucun dépassement de dotation")
-
-        # Export
+        
         # ===================== EXPORT IMAGE PAR BLOCS =====================
 
         if st.button("📸 Capturer tableau en images (20 lignes par image)"):
