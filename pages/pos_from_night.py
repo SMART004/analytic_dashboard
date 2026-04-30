@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 from utils.helpers import load_file, clean_phone, to_excel
 import plotly.express as px
+from utils.storage import upload_file, get_all_files
+from utils.supabase import supabase
 
+BUCKET_NAME = "pos-night-result-files"
 
 def show_pos_nuit():
     st.title("🌙 POS de Nuit")
@@ -24,21 +27,33 @@ def show_pos_nuit():
         key="pos_nuit_files"
     )
 
-    if not trans_files:
-        st.info("Veuillez uploader les fichiers de transactions")
-        return
+    # if not trans_files:
+    #     st.info("Veuillez uploader les fichiers de transactions")
+    #     return
+
+    if trans_files:
+        for file in trans_files:
+            upload_file(
+                supabase=supabase,
+                bucket=BUCKET_NAME,
+                uploaded_file=file
+            )
+        get_all_files.clear()
+        st.success("Fichiers uploadés avec succès")
+
+        # refresh page
+        st.rerun()
 
     with st.spinner("Analyse POS de nuit en cours..."):
-        df_list = []
-        for f in trans_files:
-            temp = load_file(f)
-            temp["source_file"] = f.name
-            df_list.append(temp)
+        df = get_all_files(
+            bucket=BUCKET_NAME
+        )
 
-        df = pd.concat(df_list, ignore_index=True)
-        df.columns = [c.strip() for c in df.columns]
-        #debug
-        # st.write(df)
+        if df is None or df.empty:
+            st.warning("Aucun fichier de transactions trouvé")
+            st.stop()
+
+        st.success(f"{len(df)} lignes chargées")
 
         df["Date"] = pd.to_datetime(df.get("Date"), errors="coerce")
         df["Amount"] = pd.to_numeric(df.get("Amount"), errors="coerce").fillna(0).abs()

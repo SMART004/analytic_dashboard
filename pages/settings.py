@@ -1,17 +1,17 @@
 import streamlit as st
 from utils.helpers import load_file
 import pandas as pd
+from utils.supabase import handle_upload
 
 def show_settings():
     st.title("⚙️ Settings - Configurations")
     st.markdown("**Chargez ici tous les fichiers et configurations de l'application**")
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab6, tab7 = st.tabs([
         "Commerciaux", 
         "Caisses", 
         "Zones", 
         "Maître POS", 
-        "Numéros de Dotation",
         "Masters",
         "CDS"
     ])
@@ -21,136 +21,79 @@ def show_settings():
         st.subheader("Fichier Configuration Commerciaux")
         st.markdown("Colonnes attendues : `Zone_Territoire`, `Zone_SA`, `Nom_Ccial`, `Ccial_MSISDN`")
         
-        comm_file = st.file_uploader(
-            "Upload Fichier Commerciaux",
-            type=["xlsx", "xls", "csv"],
-            key="comm_config"
+        handle_upload(
+            tab_title="Fichier Commerciaux",
+            uploader_label="Upload Fichier Commerciaux",
+            uploader_key="comm_file_uploader", 
+            session_key="commercial_config_df",
+            folder_name="commerciaux"
         )
-        if comm_file:
-            df_comm = load_file(comm_file)
-            st.session_state.commercial_config_df = df_comm
-            st.success(f"Fichier Commerciaux chargé ({len(df_comm)} lignes)")
-            st.dataframe(df_comm.head(10), use_container_width=True)
 
     # ===================== ONGLET CAISSES =====================
     with tab2:
         st.subheader("Fichier Configuration Caisses")
         st.markdown("Colonnes attendues : `NUM`, `CAISSE`")
         
-        caisse_file = st.file_uploader(
-            "Upload Fichier Caisses (Liste d'exclusion)",
-            type=["xlsx", "xls", "csv"],
-            key="caisse_config"
+        handle_upload(
+            tab_title="Fichier Caisses",
+            uploader_label="Upload Fichier Caisses",
+            uploader_key="caisse_file_uploader", 
+            session_key="exclusion_df",
+            folder_name="caisses"
         )
-        if caisse_file:
-            df_caisse = load_file(caisse_file)
-            st.session_state.exclusion_df = df_caisse
-            st.success(f"Fichier Caisses chargé ({len(df_caisse)} lignes)")
-            st.dataframe(df_caisse.head(10), use_container_width=True)
 
     # ===================== ONGLET ZONES =====================
     with tab3:
         st.subheader("Fichier Zones Hiérarchique")
         st.markdown("Colonnes attendues : `ZONE NEW`, `TERRITORY CORRECT`, `ISL_Terr`, `SITENAME`")
-        
-        zones_file = st.file_uploader(
-            "Upload Fichier Zones",
-            type=["xlsx", "xls", "csv"],
-            key="zones_config"
+         
+        handle_upload(
+            tab_title="Fichier Zones",
+            uploader_label="Upload Fichier Zones",
+            uploader_key="zone_file_uploader", 
+            session_key="zones_df",
+            folder_name="zones"
         )
-        if zones_file:
-            df_zones = load_file(zones_file)
-            st.session_state.zones_df = df_zones
-            st.success(f"Fichier Zones chargé ({len(df_zones)} lignes)")
-            st.dataframe(df_zones.head(10), use_container_width=True)
 
     # ===================== ONGLET MAÎTRE POS =====================
     with tab4:
         st.subheader("Fichier Maître POS")
         st.markdown("Contient les informations des POS (Day_Target, OOS_Target, etc.)")
         
-        pos_file = st.file_uploader(
-            "Upload Fichier Maître POS",
-            type=["xlsx", "xls", "csv"],
-            key="pos_master_config"
+        handle_upload(
+            tab_title="Fichier Maître POS",
+            uploader_label="Upload Fichier Maître POS",
+            uploader_key="maitre_file_uploader", 
+            session_key="pos_master_df",
+            folder_name="maitre_pos"
         )
-        if pos_file:
-            df_pos = load_file(pos_file)
-            st.session_state.pos_master_df = df_pos
-            st.success(f"Fichier Maître POS chargé ({len(df_pos)} lignes)")
-            st.dataframe(df_pos.head(10), use_container_width=True)
 
-    # ===================== ONGLET NUMÉROS DE DOTATION =====================
-    with tab5:
-        st.subheader("Configuration des Numéros de Dotation")
-        st.markdown("""
-        Ajoutez ici les numéros qui servent à **doter** les commerciaux.  
-        Ces numéros seront utilisés pour calculer l'**Heure de dotation** et le **Montant de dotation**.
-        """)
-
-        # Input pour ajouter des numéros manuellement
-        new_number = st.text_input("Ajouter un numéro de dotation (MSISDN)", placeholder="2376XXXXXXXX")
-        
-        col_add, col_clear = st.columns([3, 1])
-        with col_add:
-            if st.button("Ajouter ce numéro"):
-                if new_number:
-                    if 'dotation_numbers' not in st.session_state:
-                        st.session_state.dotation_numbers = []
-                    if new_number not in st.session_state.dotation_numbers:
-                        st.session_state.dotation_numbers.append(new_number)
-                        st.success(f"Numéro {new_number} ajouté")
-                    else:
-                        st.warning("Ce numéro est déjà dans la liste")
-                else:
-                    st.warning("Veuillez entrer un numéro")
-
-        with col_clear:
-            if st.button("Effacer tout"):
-                st.session_state.dotation_numbers = []
-                st.success("Liste effacée")
-
-        # Affichage de la liste actuelle
-        if 'dotation_numbers' in st.session_state and st.session_state.dotation_numbers:
-            st.write("**Numéros de dotation configurés :**")
-            dotation_df = pd.DataFrame({"Numéro de Dotation": st.session_state.dotation_numbers})
-            st.dataframe(dotation_df, use_container_width=True)
-        else:
-            st.info("Aucun numéro de dotation configuré pour le moment.")
-
-        st.caption("Ces numéros seront utilisés dans la page Performance pour calculer l'heure et le montant de dotation.")
-
+    
     # ===================== ONGLET Masters =====================
     with tab6:
         st.subheader("Fichier Configuration Master")
         st.markdown("Colonnes attendues : `NUM`, `MASTER`")
         
-        master_file = st.file_uploader(
-            "Upload Fichier MASTER (Liste d'exclusion)",
-            type=["xlsx", "xls", "csv"],
-            key="master_config"
+        handle_upload(
+            tab_title="Fichier Masters",
+            uploader_label="Upload Fichier MASTER",
+            uploader_key="master_file_uploader", 
+            session_key="exclusion_master",
+            folder_name="masters"
         )
-        if master_file:
-            df_master = load_file(master_file)
-            st.session_state.exclusion_master = df_master
-            st.success(f"Fichier Masters chargé ({len(df_master)} lignes)")
-            st.dataframe(df_master.head(10), use_container_width=True)
     
     # ===================== ONGLET CDS =====================
     with tab7:
         st.subheader("Fichier Configuration CDS")
         st.markdown("Colonnes attendues : `NUM`, `CDS`")
         
-        cds_file = st.file_uploader(
-            "Upload Fichier CDS (Liste d'exclusion)",
-            type=["xlsx", "xls", "csv"],
-            key="cds_config"
+        handle_upload(
+            tab_title="Fichier CDS",
+            uploader_label="Upload Fichier CDS",
+            uploader_key="cds_file_uploader", 
+            session_key="exclusion_cds",
+            folder_name="cds"
         )
-        if cds_file:
-            df_cds = load_file(cds_file)
-            st.session_state.exclusion_cds = df_cds
-            st.success(f"Fichier CDS chargé ({len(df_cds)} lignes)")
-            st.dataframe(df_cds.head(10), use_container_width=True)
 
     st.divider()
     st.info("Tous les fichiers et configurations chargés ici sont disponibles dans les autres pages.")

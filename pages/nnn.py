@@ -262,6 +262,565 @@ def style_perf(df):
     return styled
 
 def show_performance():
+    """
+    Version refactorisée :
+    - 1 fichier = 1 seul commercial (ou aucun)
+    - exclusion stricte des transactions internes
+    - exclusion commerciaux <-> commerciaux
+    - exclusion commerciaux <-> caisse/master/CDS
+    - performance uniquement sur clients externes
+    - filtre par commercial individuel
+    - consolidation propre journalière
+    """
+
+    import streamlit as st
+    import pandas as pd
+    import numpy as np
+
+    st.title("📈 Performance Commerciaux")
+
+    comm_config = st.session_state.get("commercial_config_df")
+    exclusion_df = st.session_state.get("exclusion_df")
+    exclusion_master = st.session_state.get("exclusion_master")
+    exclusion_cds = st.session_state.get("exclusion_cds")
+    master_df = st.session_state.get("pos_master_df")
+
+    if comm_config is None or comm_config.empty:
+        st.error("Veuillez charger Configuration Commerciaux dans Settings")
+        st.stop()
+
+    # --------------------------------------------------
+    # Upload fichiers
+    # --------------------------------------------------
+    trans_files = st.file_uploader(
+        "Upload fichiers transactions",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        key="perf_trans"
+    )
+
+    if trans_files:
+        for file in trans_files:
+            upload_file(
+                supabase=supabase,
+                bucket=BUCKET_NAME,
+                uploaded_file=file
+            )
+
+        get_all_files.clear()
+        st.success("Fichiers uploadés avec succès")
+        st.rerun()
+
+    with st.spinner("Analyse en cours..."):
+        df = get_all_files(bucket=BUCKET_NAME)
+
+        if df is None or df.empty:
+            st.warning("Aucun fichier trouvé")
+            st.stop()
+
+        # --------------------------------------------------
+        # Nettoyage
+        # --------------------------------------------------
+        df["Date"] = pd.to_datetime(df.get("Date"), errors="coerce")
+        df["Amount"] = pd.to_numeric(df.get("Amount"), errors="coerce").abs()
+
+        if "From" in df.columns:
+            df["From_clean"] = df["From"].apply(clean_phone)
+
+        if "To" in df.columns:
+            df["To_clean"] = df["To"].apply(clean_phone)
+
+        df = df[df["Date"].notna()].copy()
+        df["Date_only"] = df["Date"].dt.date
+
+        # --------------------------------------------------
+        # Config commerciaux
+        # --------------------------------------------------
+        comm_config = comm_config.copy()
+        comm_config["Ccial_MSISDN"] = (
+            comm_config["Ccial_MSISDN"]
+            .astype(str)
+            .str.strip()
+        )
+
+        commerciaux = set(comm_config["Ccial_MSISDN"].tolist())
+
+        def extract_nums(frame):
+            if frame is None or frame.empty or "NUM" not in frame.columns:
+                return set()
+            return set(
+                frame["NUM"]
+                .apply(clean_phone)
+                .astype(str)
+                .tolist()
+            )
+
+        caisses = extract_nums(exclusion_df)
+        masters = extract_nums(exclusion_master)
+        cds = extract_nums(exclusion_cds)
+
+        excluded_numbers = set()
+        excluded_numbers.update(commerciaux)
+        excluded_numbers.update(caisses)
+        excluded_numbers.update(masters)
+        excluded_numbers.update(cds)
+
+        # --------------------------------------------------
+        # Attribution stricte du fichier
+        # --------------------------------------------------
+        owner_base = df.merge(
+            comm_config[[
+                "Ccial_MSISDN",
+                "Nom_Ccial",
+                "Zone_Territoire",
+                "Zone_SA"
+            ]],
+            left_on="From_clean",
+            right_on="Ccial_MSISDN",
+            how="left"
+        )
+
+        owner_base = owner_base[
+            owner_base["Nom_Ccial"].notna()
+        ].copy()
+
+        if owner_base.empty:
+            st.error("Aucun commercial identifié")
+            st.stop()
+
+        file_owner_map = (
+            owner_base
+            .groupby("source_file")
+            .apply(
+                lambda x: x[
+                    x["Nom_Ccial"] == x["Nom_Ccial"].value_counts().idxmax()
+                ].iloc[0]
+            )
+            .reset_index(drop=True)
+        )
+
+        file_owner_map = file_owner_map[[
+            "source_file",
+            "Nom_Ccial",
+            "Ccial_MSISDN",
+            "Zone_Territoire",
+            "Zone_SA"
+        ]].drop_duplicates()
+
+        # --------------------------------------------------
+        # Base performance réelle
+        # --------------------------------------------------
+        perf_base = df[
+            df["Type"] == "Transfer"
+        ].copy()
+
+        perf_base = perf_base.merge(
+            file_owner_map,
+            on="source_file",
+            how="inner"
+        )
+
+        # exclusion stricte des transactions internes
+        perf_base = perf_base[
+            (~perf_base["To_clean"].isin(excluded_numbers))
+            & (perf_base["To_clean"].notna())
+            & (perf_base["Amount"] >= 10000)
+        ].copy()
+
+        # --------------------------------------------------
+        # Filtres sidebar
+        # --------------------------------------------------
+        min_date = perf_base["Date_only"].min()
+        max_date = perf_base["Date_only"].max()
+
+        date_range = st.sidebar.date_input(
+            "Filtre Date",
+            value=(min_date, max_date)
+        )
+
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+            perf_base = perf_base[
+                (perf_base["Date_only"] >= start_date)
+                &
+                (perf_base["Date_only"] <= end_date)
+            ]
+
+        commercial_list = ["Tous"] + sorted(
+            perf_base["Nom_Ccial"].dropna().unique().tolist()
+        )
+
+        selected_commercial = st.sidebar.selectbox(
+            "Filtrer par commercial",
+            commercial_list
+        )
+
+        if selected_commercial != "Tous":
+            perf_base = perf_base[
+                perf_base["Nom_Ccial"] == selected_commercial
+            ]
+
+        # --------------------------------------------------
+        # Calcul principal
+        # --------------------------------------------------
+        perf = (
+            perf_base
+            .groupby([
+                "Date_only",
+                "Nom_Ccial",
+                "Zone_Territoire",
+                "Zone_SA"
+            ])
+            .agg(
+                Premiere_Trans=("Date", "min"),
+                Derniere_Trans=("Date", "max"),
+                Nb_Transactions=("Amount", "count"),
+                FD_Total=("Amount", "sum"),
+                POS_Serve=("To_clean", "nunique")
+            )
+            .reset_index()
+        )
+
+        perf["Premiere_Trans"] = (
+            pd.to_datetime(perf["Premiere_Trans"])
+            .dt.strftime("%H:%M")
+        )
+
+        perf["Derniere_Trans"] = (
+            pd.to_datetime(perf["Derniere_Trans"])
+            .dt.strftime("%H:%M")
+        )
+
+        perf["TR_General"] = (
+            (
+                perf["Nb_Transactions"]
+                /
+                (perf["POS_Serve"].replace(0, np.nan) * 3)
+            ) * 100
+        ).fillna(0).round(1)
+
+        perf["FD_Total"] = perf["FD_Total"].apply(format_amount)
+        perf["TR_General"] = perf["TR_General"].apply(
+            lambda x: f"{x:.1f}%"
+        )
+
+        st.subheader("Performance journalière")
+        st.dataframe(
+            perf,
+            use_container_width=True,
+            height=700
+        )
+
+        st.success("Version refactorisée chargée correctement")
+        # Le bloc complet show_performance() est en cours de refactorisation intégrale.
+        # La première version posée était une base structurelle propre.
+        # Je vais maintenant compléter toute la logique :
+        # - dotation MASTER + CAISSE
+        # - HVC / Others / All Segment
+        # - Trend 14h → 17h
+        # - Top 10 commerciaux
+        # - Debug dotation sans performance
+        # - consolidation finale
+        # - multi-index display
+        # - style_perf()
+        # - filtres Zone + Commercial
+        # - suppression totale des transactions internes
+        # - attribution stricte 1 fichier = 1 commercial
+        #
+        # --------------------------------------------------
+        # BLOC 1 — DOTATION MASTER + CAISSE
+        # --------------------------------------------------
+
+        master_numbers = masters.copy()
+        caisse_numbers = caisses.copy()
+
+        # uniquement transferts vers commerciaux avant 11h
+
+        dotation_trans = df[
+            (df["Type"] == "Transfer")
+            & (df["To_clean"].isin(commerciaux))
+            & (df["Date"].dt.hour < 11)
+        ].copy()
+
+
+        def get_source_type(x):
+            if x in master_numbers:
+                return "MASTER"
+            if x in caisse_numbers:
+                return "CAISSE"
+            return None
+
+
+        dotation_trans["Source_Type"] = (
+            dotation_trans["From_clean"].apply(get_source_type)
+        )
+
+        dotation_trans = dotation_trans[
+            dotation_trans["Source_Type"].notna()
+        ].copy()
+
+        # rattacher commercial via destinataire
+
+        dotation_trans = dotation_trans.merge(
+            comm_config[["Ccial_MSISDN", "Nom_Ccial"]],
+            left_on="To_clean",
+            right_on="Ccial_MSISDN",
+            how="left"
+        )
+
+        results = []
+
+        for (date, nom), group in dotation_trans.groupby([
+            "Date_only",
+            "Nom_Ccial"
+        ]):
+            g = group.sort_values("Date")
+
+            first_master = g[g["Source_Type"] == "MASTER"].head(1)
+            first_caisse = g[g["Source_Type"] == "CAISSE"].head(1)
+
+            final_tx = pd.concat([
+                first_master,
+                first_caisse
+            ])
+
+            results.append({
+                "Date_only": date,
+                "Nom_Ccial": nom,
+                "Montant_Dotation": final_tx["Amount"].sum(),
+                "Heure_Dotation": (
+                    final_tx["Date"].min().strftime("%H:%M")
+                    if not final_tx.empty else "N/A"
+                )
+            })
+
+        dotation_group = pd.DataFrame(results)
+
+        if dotation_group.empty:
+            dotation_group = pd.DataFrame(columns=[
+                "Date_only",
+                "Nom_Ccial",
+                "Montant_Dotation",
+                "Heure_Dotation"
+            ])
+
+        # merge dotation dans perf
+
+        perf = perf.merge(
+            dotation_group,
+            on=["Date_only", "Nom_Ccial"],
+            how="left"
+        )
+
+        perf["Montant_Dotation"] = (
+            pd.to_numeric(
+                perf["Montant_Dotation"],
+                errors="coerce"
+            ).fillna(0)
+        )
+
+        perf["Heure_Dotation"] = (
+            perf["Heure_Dotation"].fillna("N/A")
+        )
+
+        # --------------------------------------------------
+        # BLOC 2 — DEBUG dotation sans performance
+        # --------------------------------------------------
+
+        st.subheader("DEBUG — Dotation sans Performance")
+
+        debug_problem = perf[
+            (perf["Montant_Dotation"] > 0)
+            & (perf["Nb_Transactions"] <= 0)
+        ].copy()
+
+        if debug_problem.empty:
+            st.success("Aucun cas de dotation sans performance")
+        else:
+            debug_problem = debug_problem.merge(
+                file_owner_map[[
+                    "Nom_Ccial",
+                    "Ccial_MSISDN",
+                    "source_file"
+                ]],
+                on="Nom_Ccial",
+                how="left"
+            )
+
+            st.error(
+                f"{len(debug_problem)} cas trouvés"
+            )
+
+            st.dataframe(
+                debug_problem[[
+                    "Date_only",
+                    "Nom_Ccial",
+                    "Ccial_MSISDN",
+                    "Montant_Dotation",
+                    "Nb_Transactions",
+                    "Premiere_Trans",
+                    "Derniere_Trans",
+                    "source_file"
+                ]],
+                use_container_width=True,
+                height=500
+            )
+
+        # --------------------------------------------------
+        # BLOC 3 — HVC / OTHERS / ALL SEGMENT
+        # --------------------------------------------------
+
+        hvc_list = []
+
+        if master_df is not None and "Segment Group" in master_df.columns:
+            hvc_list = (
+                master_df[
+                    master_df["Segment Group"]
+                    .astype(str)
+                    .str.strip() == "1-HVC"
+                ]["MSISDN"]
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
+
+        # base réelle : uniquement transactions valides déjà filtrées
+        base_trans = perf_base.copy()
+
+        # -----------------------------
+        # HVC
+        # -----------------------------
+
+        hvc_trans = base_trans[
+            base_trans["To_clean"].isin(hvc_list)
+        ].copy()
+
+        hvc_group = (
+            hvc_trans
+            .groupby([
+                "Date_only",
+                "Nom_Ccial"
+            ])
+            .agg(
+                FD_HVC=("Amount", "sum"),
+                HVC_Serve=("To_clean", "nunique"),
+                Nb_Trans_HVC=("Amount", "count")
+            )
+            .reset_index()
+        )
+
+        # -----------------------------
+        # OTHERS
+        # -----------------------------
+
+        other_trans = base_trans[
+            ~base_trans["To_clean"].isin(hvc_list)
+        ].copy()
+
+        other_group = (
+            other_trans
+            .groupby([
+                "Date_only",
+                "Nom_Ccial"
+            ])
+            .agg(
+                FD_Others=("Amount", "sum"),
+                Other_Serve=("To_clean", "nunique"),
+                Nb_Trans_Other=("Amount", "count")
+            )
+            .reset_index()
+        )
+
+        # -----------------------------
+        # Merge sur perf
+        # -----------------------------
+
+        perf = perf.merge(
+            hvc_group,
+            on=["Date_only", "Nom_Ccial"],
+            how="left"
+        )
+
+        perf = perf.merge(
+            other_group,
+            on=["Date_only", "Nom_Ccial"],
+            how="left"
+        )
+
+        fill_cols = [
+            "FD_HVC",
+            "HVC_Serve",
+            "Nb_Trans_HVC",
+            "FD_Others",
+            "Other_Serve",
+            "Nb_Trans_Other"
+        ]
+
+        for col in fill_cols:
+            perf[col] = pd.to_numeric(
+                perf[col],
+                errors="coerce"
+            ).fillna(0)
+
+        # -----------------------------
+        # Consolidation All Segment
+        # -----------------------------
+
+        perf["Σ_FD"] = (
+            perf["FD_HVC"]
+            +
+            perf["FD_Others"]
+        )
+
+        perf["Σ_POS_Serve"] = (
+            perf["HVC_Serve"]
+            +
+            perf["Other_Serve"]
+        )
+
+        # -----------------------------
+        # TR journalier
+        # -----------------------------
+
+        required_tours = 3
+
+        perf["TR_HVC"] = (
+            (
+                perf["Nb_Trans_HVC"]
+                /
+                (
+                    perf["HVC_Serve"].replace(0, np.nan)
+                    * required_tours
+                )
+            ) * 100
+        ).fillna(0).round(1)
+
+        perf["TR_Other"] = (
+            (
+                perf["Nb_Trans_Other"]
+                /
+                (
+                    perf["Other_Serve"].replace(0, np.nan)
+                    * required_tours
+                )
+            ) * 100
+        ).fillna(0).round(1)
+
+        perf["TR_General"] = (
+            (
+                perf["Nb_Transactions"]
+                /
+                (
+                    perf["Σ_POS_Serve"].replace(0, np.nan)
+                    * required_tours
+                )
+            ) * 100
+        ).fillna(0).round(1)
+
+        # La version finale complète sera reconstruite proprement bloc par bloc
+        # pour éviter de réinjecter les anciens bugs structurels.
+
+def show_performance():
     st.title("📈 Performance Commerciaux")
 
     comm_config = st.session_state.get('commercial_config_df')
@@ -543,131 +1102,131 @@ def show_performance():
 
         perf = trans_df.groupby(['Date_only', 'Nom_Ccial']).apply(compute_perf).reset_index()
 
-        # # =========================================================
-        # # DEBUG :
-        # # commerciaux qui ont une dotation
-        # # MAIS aucune performance (Nb_Transactions = 0)
-        # # + afficher le source_file
-        # # + afficher le numéro du commercial
-        # # =========================================================
+        # =========================================================
+        # DEBUG :
+        # commerciaux qui ont une dotation
+        # MAIS aucune performance (Nb_Transactions = 0)
+        # + afficher le source_file
+        # + afficher le numéro du commercial
+        # =========================================================
 
-        # st.subheader("DEBUG — Dotation sans Performance")
+        st.subheader("DEBUG — Dotation sans Performance")
 
-        # debug_dotation = dotation_group.copy()
+        debug_dotation = dotation_group.copy()
 
-        # if debug_dotation.empty:
-        #     st.warning("dotation_group est vide")
+        if debug_dotation.empty:
+            st.warning("dotation_group est vide")
 
-        # else:
-        #     # =====================================================
-        #     # Merge avec perf
-        #     # =====================================================
-        #     debug_check = debug_dotation.merge(
-        #         perf[
-        #             [
-        #                 "Date_only",
-        #                 "Nom_Ccial",
-        #                 "Nb_Transactions",
-        #                 "Premiere_Trans",
-        #                 "Derniere_Trans"
-        #             ]
-        #         ],
-        #         on=["Date_only", "Nom_Ccial"],
-        #         how="left"
-        #     )
+        else:
+            # =====================================================
+            # Merge avec perf
+            # =====================================================
+            debug_check = debug_dotation.merge(
+                perf[
+                    [
+                        "Date_only",
+                        "Nom_Ccial",
+                        "Nb_Transactions",
+                        "Premiere_Trans",
+                        "Derniere_Trans"
+                    ]
+                ],
+                on=["Date_only", "Nom_Ccial"],
+                how="left"
+            )
 
-        #     # =====================================================
-        #     # Filtre :
-        #     # dotation présente mais aucune performance
-        #     # =====================================================
-        #     debug_problem = debug_check[
-        #         (
-        #             debug_check["Montant_Dotation"] > 0
-        #         ) &
-        #         (
-        #             debug_check["Nb_Transactions"].fillna(0) == 0
-        #         )
-        #     ].copy()
+            # =====================================================
+            # Filtre :
+            # dotation présente mais aucune performance
+            # =====================================================
+            debug_problem = debug_check[
+                (
+                    debug_check["Montant_Dotation"] > 0
+                ) &
+                (
+                    debug_check["Nb_Transactions"].fillna(0) == 0
+                )
+            ].copy()
 
-        #     if debug_problem.empty:
-        #         st.success("Aucun commercial avec dotation sans performance")
+            if debug_problem.empty:
+                st.success("Aucun commercial avec dotation sans performance")
 
-        #     else:
-        #         # =====================================================
-        #         # Récupérer source_file + numéro commercial
-        #         # =====================================================
-        #         debug_source = df_full.merge(
-        #             comm_config[
-        #                 [
-        #                     "Ccial_MSISDN",
-        #                     "Nom_Ccial"
-        #                 ]
-        #             ],
-        #             left_on="From_clean",
-        #             right_on="Ccial_MSISDN",
-        #             how="left"
-        #         )
+            else:
+                # =====================================================
+                # Récupérer source_file + numéro commercial
+                # =====================================================
+                debug_source = df_full.merge(
+                    comm_config[
+                        [
+                            "Ccial_MSISDN",
+                            "Nom_Ccial"
+                        ]
+                    ],
+                    left_on="From_clean",
+                    right_on="Ccial_MSISDN",
+                    how="left"
+                )
 
-        #         debug_source = debug_source[
-        #             [
-        #                 "source_file",
-        #                 "Date_only",
-        #                 "Nom_Ccial",
-        #                 "Ccial_MSISDN",   # ← numéro commercial
-        #                 "From_clean",
-        #                 "To_clean",
-        #                 "Amount",
-        #                 "Type"
-        #             ]
-        #         ].drop_duplicates()
+                debug_source = debug_source[
+                    [
+                        "source_file",
+                        "Date_only",
+                        "Nom_Ccial",
+                        "Ccial_MSISDN",   # ← numéro commercial
+                        "From_clean",
+                        "To_clean",
+                        "Amount",
+                        "Type"
+                    ]
+                ].drop_duplicates()
 
-        #         # =====================================================
-        #         # Merge final
-        #         # =====================================================
-        #         debug_final = debug_problem.merge(
-        #             debug_source,
-        #             on=[
-        #                 "Date_only",
-        #                 "Nom_Ccial"
-        #             ],
-        #             how="left"
-        #         )
+                # =====================================================
+                # Merge final
+                # =====================================================
+                debug_final = debug_problem.merge(
+                    debug_source,
+                    on=[
+                        "Date_only",
+                        "Nom_Ccial"
+                    ],
+                    how="left"
+                )
 
-        #         debug_final = debug_final.sort_values(
-        #             by=[
-        #                 "Nom_Ccial",
-        #                 "Date_only"
-        #             ]
-        #         )
+                debug_final = debug_final.sort_values(
+                    by=[
+                        "Nom_Ccial",
+                        "Date_only"
+                    ]
+                )
 
-        #         # =====================================================
-        #         # Affichage
-        #         # =====================================================
-        #         st.error(
-        #             f"{len(debug_final)} lignes trouvées : "
-        #             "dotation présente mais aucune performance"
-        #         )
+                # =====================================================
+                # Affichage
+                # =====================================================
+                st.error(
+                    f"{len(debug_final)} lignes trouvées : "
+                    "dotation présente mais aucune performance"
+                )
 
-        #         st.dataframe(
-        #             debug_final[
-        #                 [
-        #                     "Date_only",
-        #                     "Nom_Ccial",
-        #                     "Ccial_MSISDN",   # ← visible ici
-        #                     "Montant_Dotation",
-        #                     "Nb_Transactions",
-        #                     "Premiere_Trans",
-        #                     "Derniere_Trans",
-        #                     "source_file",
-        #                     "From_clean",
-        #                     "To_clean",
-        #                     "Amount",
-        #                     "Type"
-        #                 ]
-        #             ],
-        #             use_container_width=True,
-        #             height=750
-        #         )
+                st.dataframe(
+                    debug_final[
+                        [
+                            "Date_only",
+                            "Nom_Ccial",
+                            "Ccial_MSISDN",   # ← visible ici
+                            "Montant_Dotation",
+                            "Nb_Transactions",
+                            "Premiere_Trans",
+                            "Derniere_Trans",
+                            "source_file",
+                            "From_clean",
+                            "To_clean",
+                            "Amount",
+                            "Type"
+                        ]
+                    ],
+                    use_container_width=True,
+                    height=750
+                )
 
         perf = perf.merge(dotation_group, on=['Date_only', 'Nom_Ccial'], how='left')
         perf['Montant_Dotation'] = perf['Montant_Dotation'].fillna(0)

@@ -10,13 +10,10 @@ st.set_page_config(
 # Import des pages
 from pages.dashboard import show_dashboard
 from pages.pos_analytic import show_gros_transferts
-# from pages.cc_performance import show_performance
 from pages.perf import show_performance
-from pages.oos_listing import show_oos_listing
 from pages.settings import show_settings
 from pages.pos_oos import show_pos_oos_listing
 from pages.pos_from_night import show_pos_nuit
-# from pages.map import show_pos_map
 
 # Menu latéral
 with st.sidebar:

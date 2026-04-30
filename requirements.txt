@@ -5,3 +5,4 @@ openpyxl==3.1.5
 scikit-learn==1.6.1
 matplotlib==3.10.8
 streamlit_option_menu==0.4.0
+supabase==2.29.0

@@ -5,6 +5,10 @@ from utils.helpers import load_file, clean_phone, to_excel
 import dataframe_image as dfi
 import os
 import zipfile
+from utils.storage import upload_file, get_all_files
+from utils.supabase import supabase
+
+BUCKET_NAME = "listing-oos-result-files"
 
 def show_pos_oos_listing():
     st.title("Listing POS OOS")
@@ -75,12 +79,29 @@ def show_pos_oos_listing():
     )
 
     if transaction_files:
+        for file in transaction_files:
+            upload_file(
+                supabase=supabase,
+                bucket=BUCKET_NAME,
+                uploaded_file=file
+            )
+        get_all_files.clear()
+        st.success("Fichiers uploadés avec succès")
+
+        # refresh page
+        st.rerun()
+
         with st.spinner("Identification des POS présents dans les transactions..."):
             # Combinaison des fichiers transactions
-            df_list = [load_file(f) for f in transaction_files]
-            df_trans = pd.concat(df_list, ignore_index=True)
+            df_trans = get_all_files(
+                bucket=BUCKET_NAME
+            )
 
-            df_trans.columns = [col.strip() for col in df_trans.columns]
+            if df_trans is None or df_trans.empty:
+                st.warning("Aucun fichier de transactions trouvé")
+                st.stop()
+
+            st.success(f"{len(df)} lignes chargées")
 
             # Nettoyage des numéros From et To
             if 'From' in df_trans.columns:
