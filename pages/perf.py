@@ -7,7 +7,7 @@ import zipfile
 from utils.helpers import load_file, clean_phone, to_excel
 import plotly.graph_objects as go
 import dataframe_image as dfi
-from utils.storage import upload_file, get_all_files
+from utils.storage import upload_file, get_all_files, file_hash
 from utils.supabase import supabase
 
 BUCKET_NAME = "performance-result-files"
@@ -112,7 +112,7 @@ def style_perf(df):
         try:
             v = float(str(val).replace("%", "").strip())
 
-            if 30 <= v <= 69:
+            if 0 <= v <= 69:
                 return f"❌ {v:.1f}%"
             elif 70 <= v <= 99:
                 return f"⚠️ {v:.1f}%"
@@ -274,34 +274,76 @@ def show_performance():
         st.error("Veuillez charger le fichier **Configuration Commerciaux** dans Settings")
         st.stop()
 
-    # Configuration vitesse de rotation
-    st.sidebar.subheader("Configuration Rotation")
-    rotation_speed = st.sidebar.number_input("Vitesse de rotation", min_value=1, value=1, step=1)
-    required_tours = 3 * rotation_speed   # ex: si vitesse=2 → 6 tours
+    # ===============================
+    # INIT SESSION STATE
+    # ===============================
+    if "files_uploaded" not in st.session_state:
+        st.session_state.files_uploaded = False
 
+    if "last_uploaded_files" not in st.session_state:
+        st.session_state.last_uploaded_files = []
+
+    # ===============================
+    # UPLOAD UI
+    # ===============================
     trans_files = st.file_uploader(
-        "Upload les fichiers de transactions (plusieurs possibles)",
+        "Upload les fichiers de transactions",
         type=["xlsx", "xls", "csv"],
         accept_multiple_files=True,
         key="perf_trans"
     )
 
-    # if not trans_files:
-    #     st.info("Veuillez uploader les fichiers de transactions.")
-    #     return
-    
+    # ===============================
+    # DETECT NEW FILES
+    # ===============================
     if trans_files:
+        current_names = [f.name for f in trans_files]
+
+        if current_names != st.session_state.last_uploaded_files:
+            st.session_state.files_uploaded = False
+            st.session_state.last_uploaded_files = current_names
+
+    # ===============================
+    # UPLOAD LOGIC (SAFE)
+    # ===============================
+    if trans_files and not st.session_state.files_uploaded:
+
+        seen_hashes = set()
+        uploaded_count = 0
+
         for file in trans_files:
-            upload_file(
+
+            file_md5 = file_hash(file)
+
+            # éviter doublon dans le même batch
+            if file_md5 in seen_hashes:
+                continue
+
+            seen_hashes.add(file_md5)
+
+            success = upload_file(
                 supabase=supabase,
                 bucket=BUCKET_NAME,
                 uploaded_file=file
             )
-        get_all_files.clear()
-        st.success("Fichiers uploadés avec succès")
 
-        # refresh page
+            if success:
+                uploaded_count += 1
+
+        st.session_state.files_uploaded = True
+        get_all_files.clear()
+
+        st.success(f"{uploaded_count} fichier(s) uploadé(s) avec succès")
+
         st.rerun()
+
+    # ===============================
+    # RESET BUTTON (OPTIONNEL)
+    # ===============================
+    if st.button("🔄 Réinitialiser les uploads"):
+        st.session_state.files_uploaded = False
+        st.session_state.last_uploaded_files = []
+        st.info("Upload réinitialisé")
 
     with st.spinner("Analyse des performances en cours..."):
         df = get_all_files(
@@ -324,7 +366,21 @@ def show_performance():
             df['To_clean'] = df['To'].apply(clean_phone)
 
         df_full = df.copy()
+        # =========================================================
+        # 🧹 SUPPRESSION DES DOUBLONS (CRITIQUE)
+        # =========================================================
+        df = df.drop_duplicates(
+            subset=['Date', 'From_clean', 'To_clean', 'Amount', 'Type'],
+            keep='last'
+        )
 
+        df_full = df_full.drop_duplicates(
+            subset=['Date', 'From_clean', 'To_clean', 'Amount', 'Type'],
+            keep='last'
+        )
+
+        st.info(f"🧹 Après déduplication : {len(df)} lignes")
+        
         # ===================== FILTRE DATE =====================
         df['Date_only'] = df['Date'].dt.date
         df_full['Date_only'] = df_full['Date'].dt.date
@@ -382,6 +438,9 @@ def show_performance():
         )
 
         df = df[df['Nom_Ccial'].notna()].copy()
+        df['Zone_Territoire'] = df['Zone_Territoire'].fillna("NON RENSEIGNÉ")
+        df['Zone_SA'] = df['Zone_SA'].fillna("NON RENSEIGNÉ")
+
         df = df.groupby('source_file', group_keys=False).apply(
                 lambda x: x[x['Nom_Ccial'] == x['Nom_Ccial'].value_counts().idxmax()]
             )
@@ -391,7 +450,7 @@ def show_performance():
             st.stop()
 
         # Filtre Zone_Territoire
-        zone_list = ["Toutes"] + sorted(df['Zone_Territoire'].dropna().unique().tolist())
+        zone_list = ["Toutes"] + sorted(df['Zone_Territoire'].unique().tolist())
         selected_terr = st.sidebar.selectbox("Filtre Zone_Territoire", zone_list)
         if selected_terr != "Toutes":
             df = df[df['Zone_Territoire'] == selected_terr]
@@ -543,135 +602,12 @@ def show_performance():
 
         perf = trans_df.groupby(['Date_only', 'Nom_Ccial']).apply(compute_perf).reset_index()
 
-        # # =========================================================
-        # # DEBUG :
-        # # commerciaux qui ont une dotation
-        # # MAIS aucune performance (Nb_Transactions = 0)
-        # # + afficher le source_file
-        # # + afficher le numéro du commercial
-        # # =========================================================
-
-        # st.subheader("DEBUG — Dotation sans Performance")
-
-        # debug_dotation = dotation_group.copy()
-
-        # if debug_dotation.empty:
-        #     st.warning("dotation_group est vide")
-
-        # else:
-        #     # =====================================================
-        #     # Merge avec perf
-        #     # =====================================================
-        #     debug_check = debug_dotation.merge(
-        #         perf[
-        #             [
-        #                 "Date_only",
-        #                 "Nom_Ccial",
-        #                 "Nb_Transactions",
-        #                 "Premiere_Trans",
-        #                 "Derniere_Trans"
-        #             ]
-        #         ],
-        #         on=["Date_only", "Nom_Ccial"],
-        #         how="left"
-        #     )
-
-        #     # =====================================================
-        #     # Filtre :
-        #     # dotation présente mais aucune performance
-        #     # =====================================================
-        #     debug_problem = debug_check[
-        #         (
-        #             debug_check["Montant_Dotation"] > 0
-        #         ) &
-        #         (
-        #             debug_check["Nb_Transactions"].fillna(0) == 0
-        #         )
-        #     ].copy()
-
-        #     if debug_problem.empty:
-        #         st.success("Aucun commercial avec dotation sans performance")
-
-        #     else:
-        #         # =====================================================
-        #         # Récupérer source_file + numéro commercial
-        #         # =====================================================
-        #         debug_source = df_full.merge(
-        #             comm_config[
-        #                 [
-        #                     "Ccial_MSISDN",
-        #                     "Nom_Ccial"
-        #                 ]
-        #             ],
-        #             left_on="From_clean",
-        #             right_on="Ccial_MSISDN",
-        #             how="left"
-        #         )
-
-        #         debug_source = debug_source[
-        #             [
-        #                 "source_file",
-        #                 "Date_only",
-        #                 "Nom_Ccial",
-        #                 "Ccial_MSISDN",   # ← numéro commercial
-        #                 "From_clean",
-        #                 "To_clean",
-        #                 "Amount",
-        #                 "Type"
-        #             ]
-        #         ].drop_duplicates()
-
-        #         # =====================================================
-        #         # Merge final
-        #         # =====================================================
-        #         debug_final = debug_problem.merge(
-        #             debug_source,
-        #             on=[
-        #                 "Date_only",
-        #                 "Nom_Ccial"
-        #             ],
-        #             how="left"
-        #         )
-
-        #         debug_final = debug_final.sort_values(
-        #             by=[
-        #                 "Nom_Ccial",
-        #                 "Date_only"
-        #             ]
-        #         )
-
-        #         # =====================================================
-        #         # Affichage
-        #         # =====================================================
-        #         st.error(
-        #             f"{len(debug_final)} lignes trouvées : "
-        #             "dotation présente mais aucune performance"
-        #         )
-
-        #         st.dataframe(
-        #             debug_final[
-        #                 [
-        #                     "Date_only",
-        #                     "Nom_Ccial",
-        #                     "Ccial_MSISDN",   # ← visible ici
-        #                     "Montant_Dotation",
-        #                     "Nb_Transactions",
-        #                     "Premiere_Trans",
-        #                     "Derniere_Trans",
-        #                     "source_file",
-        #                     "From_clean",
-        #                     "To_clean",
-        #                     "Amount",
-        #                     "Type"
-        #                 ]
-        #             ],
-        #             use_container_width=True,
-        #             height=750
-        #         )
-
         perf = perf.merge(dotation_group, on=['Date_only', 'Nom_Ccial'], how='left')
         perf['Montant_Dotation'] = perf['Montant_Dotation'].fillna(0)
         perf['Heure_Dotation'] = perf['Heure_Dotation'].fillna('N/A')
+        perf[['Zone_Territoire', 'Zone_SA']] = perf[
+            ['Zone_Territoire', 'Zone_SA']
+        ].fillna("NON RENSEIGNÉ")
 
 
         # =========================================================
@@ -703,6 +639,9 @@ def show_performance():
             ]["MSISDN"].astype(str).str.strip().tolist()
 
 
+       # =========================================================
+        # BASE TRANSACTIONS (COMMUNES)
+        # =========================================================
         base_trans = df[
             (df["Type"] == "Transfer") &
             (df["Amount"] >= 10000) &
@@ -710,67 +649,116 @@ def show_performance():
             (df["To_clean"].notna())
         ].copy()
 
+        # =========================================================
+        # LISTE HVC
+        # =========================================================
+        hvc_list = []
 
-        # HVC
-        hvc_trans = base_trans[
-            base_trans["To_clean"].isin(hvc_list)
-        ].copy()
-
-        hvc_group = hvc_trans.groupby(
-            ["Date_only", "Nom_Ccial"]
-        ).agg(
-            FD_HVC=("Amount", "sum"),
-            HVC_Serve=("To_clean", "nunique"),
-            Nb_Trans_HVC=("Amount", "count")
-        ).reset_index()
-
+        if master_df is not None and "Segment Group" in master_df.columns:
+            hvc_list = (
+                master_df[
+                    master_df["Segment Group"]
+                    .astype(str)
+                    .str.strip() == "1-HVC"
+                ]["MSISDN"]
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
 
         # =========================================================
-        # CALCUL OTHERS
+        # SPLIT HVC / OTHERS
         # =========================================================
-
-        other_trans = base_trans[
-            ~base_trans["To_clean"].isin(hvc_list)
-        ].copy()
-
-        other_group = other_trans.groupby(
-            ["Date_only", "Nom_Ccial"]
-        ).agg(
-            FD_Others=("Amount", "sum"),
-            Other_Serve=("To_clean", "nunique"),
-            Nb_Trans_Other=("Amount", "count")
-        ).reset_index()
-
+        base_trans["Segment"] = np.where(
+            base_trans["To_clean"].isin(hvc_list),
+            "HVC",
+            "OTHER"
+        )
 
         # =========================================================
-        # MERGE SUR PERF JOURNALIER
+        # CALCUL CENTRAL (ULTRA IMPORTANT)
+        # FD + SERVE + COUNT CALCULÉS ENSEMBLE
         # =========================================================
+        def compute_segment_metrics(group):
+            return pd.Series({
+                "FD": group["Amount"].sum(),
+                "Serve": group["To_clean"].nunique(),
+                "Nb_Trans": len(group)
+            })
 
+        segment_group = (
+            base_trans
+            .groupby(["Date_only", "Nom_Ccial", "Segment"])
+            .apply(compute_segment_metrics)
+            .reset_index()
+        )
+
+        # =========================================================
+        # PIVOT POUR AVOIR HVC / OTHER EN COLONNES
+        # =========================================================
+        pivot_df = segment_group.pivot_table(
+            index=["Date_only", "Nom_Ccial"],
+            columns="Segment",
+            values=["FD", "Serve", "Nb_Trans"],
+            fill_value=0
+        )
+
+        pivot_df.columns = [
+            f"{col[0]}_{col[1]}" for col in pivot_df.columns
+        ]
+
+        pivot_df = pivot_df.reset_index()
+
+        # =========================================================
+        # RENOMMAGE FINAL
+        # =========================================================
+        pivot_df = pivot_df.rename(columns={
+            "FD_HVC": "FD_HVC",
+            "Serve_HVC": "HVC_Serve",
+            "Nb_Trans_HVC": "Nb_Trans_HVC",
+
+            "FD_OTHER": "FD_Others",
+            "Serve_OTHER": "Other_Serve",
+            "Nb_Trans_OTHER": "Nb_Trans_Other"
+        })
+
+        # =========================================================
+        # MERGE AVEC PERF
+        # =========================================================
         perf = perf.merge(
-            hvc_group,
+            pivot_df,
             on=["Date_only", "Nom_Ccial"],
             how="left"
         )
 
-        perf = perf.merge(
-            other_group,
-            on=["Date_only", "Nom_Ccial"],
-            how="left"
-        )
+        # =========================================================
+        # REMPLISSAGE FINAL (SAFE)
+        # =========================================================
+        cols_fill = [
+            "FD_HVC", "HVC_Serve", "Nb_Trans_HVC",
+            "FD_Others", "Other_Serve", "Nb_Trans_Other"
+        ]
+
+        for col in cols_fill:
+            perf[col] = perf[col].fillna(0)
 
         # =========================================================
         # COLONNES GLOBALES
         # =========================================================
+        perf["Σ_FD"] = perf["FD_HVC"] + perf["FD_Others"]
+        perf["Σ_POS_Serve"] = perf["HVC_Serve"] + perf["Other_Serve"]
 
-        perf["Σ_FD"] = (
-            perf["FD_HVC"] +
-            perf["FD_Others"]
-        )
+        # =========================================================
+        # 🔍 CONTROLE QUALITÉ (CRITIQUE)
+        # =========================================================
+        anomaly = perf[
+            ((perf["FD_HVC"] == 0) & (perf["HVC_Serve"] > 0)) |
+            ((perf["FD_HVC"] > 0) & (perf["HVC_Serve"] == 0))
+        ]
 
-        perf["Σ_POS_Serve"] = (
-            perf["HVC_Serve"] +
-            perf["Other_Serve"]
-        )
+        if not anomaly.empty:
+            st.error("🚨 Incohérence détectée entre FD_HVC et HVC_Serve")
+            st.dataframe(anomaly, height=300)
 
         # =========================================================
         # TREND [14H → 17H] VERSION CORRECTE
@@ -942,23 +930,25 @@ def show_performance():
         perf_final["TR_HVC"] = (
             (
                 perf_final['Nb_Trans_HVC']
-                / (perf_final["HVC_Serve"].replace(0, np.nan) * required_tours_period)
+                / (perf_final["HVC_Serve"].replace(0, np.nan) * perf_final["Nb_Jours"] * 3)
             ) * 100
         ).fillna(0).round(1)
 
         perf_final["TR_Other"] = (
             (
                 perf_final['Nb_Trans_Other'] 
-                / (perf_final["Other_Serve"].replace(0, np.nan) * required_tours_period)
+                / (perf_final["Other_Serve"].replace(0, np.nan) * perf_final["Nb_Jours"] * 3)
             ) * 100
         ).fillna(0).round(1)
 
         perf_final["TR_General"] = (
             (
                 perf_final["Nb_Transactions"]
-                / (perf_final["Σ_POS_Serve"].replace(0, np.nan) * required_tours_period)
+                / (perf_final["Σ_POS_Serve"].replace(0, np.nan) * perf_final["Nb_Jours"] * 3)
             ) * 100
         ).fillna(0).round(1)
+        
+        perf_final["Σ_FD_raw"] = perf_final["Σ_FD"]
 
         # formatage affichage
         for col in ["Montant_Dotation", "FD_HVC", "FD_Others", "Σ_FD"]:
@@ -967,11 +957,11 @@ def show_performance():
         perf_final["TR_HVC"] = perf_final["TR_HVC"].apply(lambda x: f"{x:.1f}%")
         perf_final["TR_Other"] = perf_final["TR_Other"].apply(lambda x: f"{x:.1f}%")
         perf_final["TR_General"] = perf_final["TR_General"].apply(lambda x: f"{x:.1f}%")
-        perf_final['POS_serve'] = pd.to_numeric(perf['POS_serve'], errors='coerce').fillna(0).astype(int)
-        perf_final['New'] = pd.to_numeric(perf['New'], errors='coerce').fillna(0).astype(int)
-        perf_final['HVC_Serve'] = pd.to_numeric(perf['HVC_Serve'], errors='coerce').fillna(0).astype(int)
-        perf_final['Other_Serve'] = pd.to_numeric(perf['Other_Serve'], errors='coerce').fillna(0).astype(int)
-        perf_final['Σ_POS_Serve'] = pd.to_numeric(perf['Σ_POS_Serve'], errors='coerce').fillna(0).astype(int)
+        perf_final['POS_serve'] = pd.to_numeric(perf_final['POS_serve'], errors='coerce').fillna(0).astype(int)
+        perf_final['New'] = pd.to_numeric(perf_final['New'], errors='coerce').fillna(0).astype(int)
+        perf_final['HVC_Serve'] = pd.to_numeric(perf_final['HVC_Serve'], errors='coerce').fillna(0).astype(int)
+        perf_final['Other_Serve'] = pd.to_numeric(perf_final['Other_Serve'], errors='coerce').fillna(0).astype(int)
+        perf_final['Σ_POS_Serve'] = pd.to_numeric(perf_final['Σ_POS_Serve'], errors='coerce').fillna(0).astype(int)
         # perf = perf.rename(columns={'Date_only': 'Date'})
 
         # dataset principal devient le consolidé
@@ -1007,12 +997,13 @@ def show_performance():
             ("TREND [14H→17H]", "New")
         ])
 
-        # def highlight_dotation(row):
-        #     if row[("Dotations", "Montant")] and row.name is not None:
-        #         val = perf.loc[row.name, 'Montant_Dotation_raw']
-        #         if val > 4_000_000:
-        #             return ['background-color: red'] * len(row)
-        #     return [''] * len(row)
+        def highlight_dotation(row):
+            val = row[("Transactions (Transfert)", "Σ trx")]
+
+            if pd.notna(val) and val == 0:
+                return ['background-color: red'] * len(row)
+
+            return [''] * len(row)
         
         perf_display = perf.copy()
 
@@ -1031,7 +1022,7 @@ def show_performance():
 
         st.subheader("Performance Détaillée des Commerciaux")
         styled_df = style_perf(perf_display)
-        # styled_df = styled_df.apply(highlight_dotation, axis=1)
+        styled_df = styled_df.apply(highlight_dotation, axis=1)
 
         st.dataframe(styled_df, use_container_width=True, height=650)
 
@@ -1052,82 +1043,95 @@ def show_performance():
         top_perf = perf.copy()
 
         if selected_zone_sa != "Toutes":
-            top_perf = top_perf[
-                top_perf['Zone_SA'] == selected_zone_sa
-            ].copy()
+            top_perf = top_perf[top_perf['Zone_SA'] == selected_zone_sa].copy()
 
-        # Conversion propre de TR_General (retirer %)
+        # ===================== PRÉPARATION DES DONNÉES =====================
+        # Conversions numériques
         top_perf['TR_General_num'] = (
-            top_perf['TR_General']
-            .astype(str)
-            .str.replace('%', '', regex=False)
+            top_perf['TR_General'].astype(str).str.replace('%', '', regex=False)
+        )
+        top_perf['TR_General_num'] = pd.to_numeric(top_perf['TR_General_num'], errors='coerce').fillna(0)
+
+        for col in ['HVC_Serve', 'Σ_FD_raw', 'Σ_POS_Serve', 'Nb_Jours']:
+            if col in top_perf.columns:
+                top_perf[col] = pd.to_numeric(top_perf[col], errors='coerce').fillna(0)
+
+        # Heure de première transaction (plus tôt = mieux)
+        top_perf['Premiere_Trans_min'] = top_perf['Premiere_Trans'].apply(time_to_minutes)
+        top_perf['Premiere_Trans_min'] = top_perf['Premiere_Trans_min'].fillna(9999)
+
+        # ===================== SCORE COMPOSITE ÉQUILIBRÉ =====================
+        # Normalisation + pondération (tu peux ajuster les poids)
+
+        # Normalisation (Min-Max) pour chaque critère
+        def normalize(series):
+            min_val = series.min()
+            max_val = series.max()
+            return (series - min_val) / (max_val - min_val + 1e-8) if max_val > min_val else 0
+
+        top_perf['Score_Jours'] = normalize(top_perf['Nb_Jours'])
+        top_perf['Score_HVC'] = normalize(top_perf['HVC_Serve'])
+        top_perf['Score_TR'] = normalize(top_perf['TR_General_num'])
+        top_perf['Score_FD'] = normalize(top_perf['Σ_FD_raw'])
+        top_perf['Score_Premiere'] = 1 - normalize(top_perf['Premiere_Trans_min'])  # inversé (plus tôt = mieux)
+
+        # Score final pondéré (ajuste les % selon ton besoin)
+        top_perf['Score_Final'] = (
+            top_perf['Score_Jours'] * 0.20 +    # 20% jours de travail
+            top_perf['Score_HVC'] * 0.20 +      # 20% HVC_Serve
+            top_perf['Score_TR'] * 0.20 +       # 20% Taux de Rotation
+            top_perf['Score_FD'] * 0.20 +       # 20% Volume d'affaires
+            top_perf['Score_Premiere'] * 0.20   # 20% Commence tôt
         )
 
-        top_perf['TR_General_num'] = pd.to_numeric(
-            top_perf['TR_General_num'],
-            errors='coerce'
-        ).fillna(0)
-
-        top_perf['Σ_POS_Serve'] = pd.to_numeric(
-            top_perf['Σ_POS_Serve'],
-            errors='coerce'
-        ).fillna(0)
-
-        top_perf['HVC_Serve'] = pd.to_numeric(
-            top_perf['HVC_Serve'],
-            errors='coerce'
-        ).fillna(0)
-
-        # Tri Top 10
+        # ===================== TRI & CLASSEMENT =====================
         top_perf = top_perf.sort_values(
-            by=[
-                'HVC_Serve',
-                'TR_General_num',
-                'Σ_POS_Serve'
-            ],
+            by='Score_Final',
             ascending=False
         ).head(10).copy()
 
-        # Rang + Médailles
-        medals = {
-            1: "🥇",
-            2: "🥈",
-            3: "🥉"
-        }
+        # Ajout du rang et médailles
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
 
         top_perf = top_perf.reset_index(drop=True)
         top_perf['Rang'] = top_perf.index + 1
-
         top_perf['Classement'] = top_perf['Rang'].apply(
             lambda x: f"{medals.get(x, '')} {x}"
         )
 
-        # Tableau final
+        # ===================== AFFICHAGE =====================
         top10_display = top_perf[[
             'Classement',
             'Nom_Ccial',
             'Zone_SA',
+            'Nb_Jours',
             'Premiere_Trans',
             'HVC_Serve',
+            'Σ_FD',
             'Σ_POS_Serve',
-            'TR_General'
+            'TR_General',
+            'Score_Final'
         ]].rename(columns={
             'Classement': '🏅 Rang',
             'Nom_Ccial': 'Commercial',
             'Zone_SA': 'Zone_SA',
+            'Nb_Jours': 'Nb_Jours',
             'Premiere_Trans': 'Première Transaction',
             'HVC_Serve': 'HVC_Serve',
+            'Σ_FD': 'Σ_FD',
             'Σ_POS_Serve': 'Σ_POS_Serve',
-            'TR_General': 'TR_General'
+            'TR_General': 'TR_General',
+            'Score_Final': 'Score Global'
         })
+
+        # Optionnel : formater le score
+        top10_display['Score Global'] = top10_display['Score Global'].round(3)
 
         st.dataframe(
             top10_display,
             use_container_width=True,
             height=450
         )
-
-
         
         # ===================== EXPORT IMAGE PAR BLOCS =====================
 
