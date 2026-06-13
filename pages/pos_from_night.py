@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
-from utils.helpers import load_file, clean_phone, to_excel
+from utils.helpers import clean_phone
 import plotly.express as px
-from utils.storage import upload_file, get_all_files
-from utils.supabase import supabase
 
 BUCKET_NAME = "pos-night-result-files"
 
@@ -20,6 +18,9 @@ def show_pos_nuit():
         st.error("Veuillez charger le fichier Master POS dans Settings")
         st.stop()
 
+    # ===============================
+    # UPLOAD FICHIERS (LOCAL ONLY)
+    # ===============================
     trans_files = st.file_uploader(
         "Upload fichiers transactions",
         type=["xlsx", "xls", "csv"],
@@ -27,33 +28,56 @@ def show_pos_nuit():
         key="pos_nuit_files"
     )
 
-    # if not trans_files:
-    #     st.info("Veuillez uploader les fichiers de transactions")
-    #     return
+    # ===============================
+    # LECTURE DIRECTE (SANS STOCKAGE)
+    # ===============================
+    def read_uploaded_files(files):
+        all_df = []
 
-    if trans_files:
-        for file in trans_files:
-            upload_file(
-                supabase=supabase,
-                bucket=BUCKET_NAME,
-                uploaded_file=file
-            )
-        get_all_files.clear()
-        st.success("Fichiers uploadés avec succès")
+        for file in files:
+            try:
+                if file.name.endswith(".csv"):
+                    df = pd.read_csv(file)
+                else:
+                    df = pd.read_excel(file)
 
-        # refresh page
-        st.rerun()
+                df["source_file"] = file.name
+                all_df.append(df)
 
-    with st.spinner("Analyse POS de nuit en cours..."):
-        df = get_all_files(
-            bucket=BUCKET_NAME
+            except Exception as e:
+                st.error(f"Erreur lecture {file.name}: {e}")
+
+        if not all_df:
+            return None
+
+        final_df = pd.concat(
+            all_df,
+            ignore_index=True
         )
 
+        final_df.columns = [
+            c.strip() for c in final_df.columns
+        ]
+        return final_df
+
+
+    # ===============================
+    # TRAITEMENT
+    # ===============================
+    with st.spinner("Analyse POS de nuit en cours..."):
+
+        if not trans_files:
+            st.info("Veuillez uploader les fichiers de transactions")
+            st.stop()
+
+        df = read_uploaded_files(trans_files)
+
         if df is None or df.empty:
-            st.warning("Aucun fichier de transactions trouvé")
+            st.warning("Aucun fichier valide")
             st.stop()
 
         st.success(f"{len(df)} lignes chargées")
+
 
         df["Date"] = pd.to_datetime(df.get("Date"), errors="coerce")
         df["Amount"] = pd.to_numeric(df.get("Amount"), errors="coerce").fillna(0).abs()
@@ -68,9 +92,19 @@ def show_pos_nuit():
         if "To" in df.columns:
             df["To_clean"] = df["To"].apply(clean_phone)
 
+        # =========================================================
+        # 🧹 SUPPRESSION DES DOUBLONS (CRITIQUE)
+        # =========================================================
+        df = df.drop_duplicates(
+            subset=['Date', 'From_clean', 'To_clean', 'Amount', 'Type'],
+            keep='last'
+        )
+
+        st.info(f"🧹 Après déduplication : {len(df)} lignes")
+        
         df["Date_only"] = df["Date"].dt.date
         df["Hour"] = df["Date"].dt.hour
-
+        
         min_date = df["Date_only"].min()
         max_date = df["Date_only"].max()
 

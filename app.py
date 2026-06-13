@@ -11,66 +11,22 @@ st.set_page_config(
 from pages.dashboard import show_dashboard
 from pages.pos_analytic import show_gros_transferts
 from pages.perf import show_performance
+from pages.pos_caisse_perf import show_performance_pos_caisse
 from pages.settings import show_settings
 from pages.pos_oos import show_pos_oos_listing
 from pages.pos_from_night import show_pos_nuit
+from pages.pos_from_commerciaux import show_pos_from_commerciaux
 
 # Menu latéral
 with st.sidebar:
     selected = option_menu(
         menu_title="Menu Principal",
-        options=["Dashboard", "Analyse Gros Transferts", "Analyse des POS non Touche", "Performance Commerciaux", "Listing OOS", "Settings"],
-        icons=["house-fill", "cash-stack", "box-seam", "graph-up-arrow", "box-seam", "gear-fill"],
+        options=["Dashboard", "Analyse Gros Transferts", "Analyse des POS non Touche", "Performance Commerciaux", "Performance POS relais & Caisses", "POS par Commercial", "Listing OOS", "Settings"],
+        icons=["house-fill", "cash-stack", "box-seam", "graph-up-arrow", "graph-up-arrow", "people-fill", "box-seam", "gear-fill"],
         menu_icon="menu-button-wide",
         default_index=0,
         orientation="vertical"
     )
-
-    # # ===================== FILTRE ZONE GLOBAL =====================
-    # if st.session_state.get('zones_df') is not None and selected != "Settings":
-    #     st.sidebar.markdown("---")
-    #     st.sidebar.subheader("Filtre Zone Global")
-
-    #     zones = st.session_state.zones_df
-    #     zone_list = ["Toutes"] + sorted(zones['ZONE NEW'].dropna().unique().tolist())
-        
-    #     selected_zone = st.sidebar.selectbox(
-    #         "ZONE", 
-    #         zone_list, 
-    #         key="global_zone_filter"
-    #     )
-        
-    #     selected_terr = None
-    #     if selected_zone != "Toutes" and 'TERRITORY CORRECT' in zones.columns:
-    #         terr_list = ["Toutes"] + sorted(
-    #             zones[zones['ZONE NEW'] == selected_zone]['TERRITORY CORRECT'].dropna().unique().tolist()
-    #         )
-    #         selected_terr = st.sidebar.selectbox(
-    #             "TERRITORY", 
-    #             terr_list, 
-    #             key="global_terr_filter"
-    #         )
-    #     selected_isl = None
-    #     if selected_terr is not None and selected_terr != "Toutes" and "ISL_Terr" in zones.columns:
-    #         isl_list = ["Toutes"] + sorted(
-    #             zones[zones['TERRITORY CORRECT'] == selected_terr]['ISL_Terr'].dropna().unique().tolist()
-    #         )
-    #         selected_isl = st.sidebar.selectbox(
-    #             "Cluster", 
-    #             isl_list, 
-    #             key="global_isl_filter"
-    #         )
-
-    #     selected_site = None
-    #     if selected_isl is not None and selected_isl != "Toutes" and "SITENAME" in zones.columns:
-    #         site_list = ["Toutes"] + sorted(
-    #             zones[zones['ISL_Terr'] == selected_isl]['SITENAME'].dropna().unique().tolist()
-    #         )
-    #         selected_site = st.sidebar.selectbox(
-    #             "SITENAME",
-    #             site_list,
-    #             key="global_site_filter"
-    #         )
             
 
 # Affichage de la page sélectionnée
@@ -82,6 +38,10 @@ elif selected == "Analyse des POS non Touche":
     show_pos_nuit()
 elif selected == "Performance Commerciaux":
     show_performance()
+elif selected == "Performance POS relais & Caisses":
+    show_performance_pos_caisse()
+elif selected == "POS par Commercial":
+    show_pos_from_commerciaux()
 elif selected == "Listing OOS":
     show_pos_oos_listing()
 elif selected == "Settings":

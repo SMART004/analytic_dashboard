@@ -3,8 +3,8 @@ import pandas as pd
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
-from utils.helpers import load_file
 from io import BytesIO
+from utils.config_storage import USE_LOCAL_STORAGE, SETTINGS_PATH
 
 load_dotenv()
 
@@ -25,6 +25,67 @@ BUCKET_NAME = "settings-files"
 # HELPERS
 # =========================================================
 
+# =====================================================
+# SAVE FILE
+# =====================================================
+
+def save_file(file, folder_name):
+
+    if USE_LOCAL_STORAGE:
+
+        folder = SETTINGS_PATH / folder_name
+        folder.mkdir(parents=True, exist_ok=True)
+
+        # supprimer anciens fichiers
+        for old_file in folder.iterdir():
+            if old_file.is_file():
+                old_file.unlink()
+
+        filepath = folder / file.name
+
+        with open(filepath, "wb") as f:
+            f.write(file.getbuffer())
+
+        return str(filepath)
+
+    else:
+
+        return upload_to_supabase(file, folder_name)
+
+
+def load_setting(folder_name):
+
+    if USE_LOCAL_STORAGE:
+
+        folder = SETTINGS_PATH / folder_name
+
+        if not folder.exists():
+            return None
+
+        files = list(folder.glob("*"))
+
+        if not files:
+            return None
+
+        file_path = files[0]
+
+        if file_path.suffix.lower() == ".csv":
+            return pd.read_csv(file_path)
+
+        return pd.read_excel(file_path)
+
+    else:
+
+        files = supabase.storage.from_(BUCKET_NAME).list(folder_name)
+
+        if not files:
+            return None
+
+        file_name = files[0]["name"]
+
+        return get_file_from_supabase(
+            f"{folder_name}/{file_name}"
+        )
 
 def upload_to_supabase(file, folder_name):
     try:
@@ -103,83 +164,34 @@ def get_file_from_supabase(file_path):
 def handle_upload(
     tab_title,
     uploader_label,
-    uploader_key,   # clé widget
-    session_key,    # clé dataframe
+    uploader_key,
+    session_key,
     folder_name
 ):
-    
-    st.subheader(tab_title)
-
-    # =====================================================
-    # 1. RECHERCHE AUTOMATIQUE DU FICHIER DANS SUPABASE
-    # =====================================================
-    storage = supabase.storage.from_(BUCKET_NAME)
-    existing_files = storage.list(folder_name)
-
-    if existing_files:
-        get_file_from_supabase.clear()
-        
-        latest_file = existing_files[0]["name"]
-        file_path = f"{folder_name}/{latest_file}"
-
-        if session_key not in st.session_state:
-            df_saved = get_file_from_supabase(file_path)
-
-            if df_saved is not None:
-                st.session_state[session_key] = df_saved
-                st.session_state[f"{session_key}_path"] = file_path
-
-    # =====================================================
-    # 2. AFFICHAGE DU DATAFRAME SAUVEGARDÉ
-    # =====================================================
-    if session_key in st.session_state:
-        df_existing = st.session_state[session_key]
-
-        st.success(
-            f"Fichier déjà enregistré ({len(df_existing)} lignes)"
-        )
-
-        st.write(
-            f"📁 Source : {st.session_state.get(f'{session_key}_path', 'Supabase')}"
-        )
-
-        st.dataframe(
-            df_existing.head(10),
-            use_container_width=True
-        )
-
-        st.divider()
 
     uploaded_file = st.file_uploader(
         uploader_label,
-        type=["xlsx", "xls", "csv"],
-        key=uploader_key
+        key=uploader_key,
+        type=["xlsx", "xls", "csv"]
     )
 
     if uploaded_file:
 
-        # upload Supabase
-        file_path = upload_to_supabase(
+        save_file(
             uploaded_file,
             folder_name
         )
 
-        if file_path:
-            df = load_file(uploaded_file)
+        st.session_state[session_key] = load_setting(
+            folder_name
+        )
 
-            # stockage dataframe
+        st.success("Fichier chargé")
+
+    # rechargement automatique
+    elif session_key not in st.session_state:
+
+        df = load_setting(folder_name)
+
+        if df is not None:
             st.session_state[session_key] = df
-
-            # stockage path Supabase
-            st.session_state[f"{session_key}_path"] = file_path
-
-            st.success(
-                f"{tab_title} chargé avec succès ({len(df)} lignes)"
-            )
-
-            st.write(f"📁 Stocké dans Supabase : {file_path}")
-
-            st.dataframe(
-                df.head(10),
-                use_container_width=True
-            )

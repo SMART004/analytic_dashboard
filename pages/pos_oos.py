@@ -1,7 +1,7 @@
 # pages/pos_oos_listing.py
 import streamlit as st
 import pandas as pd
-from utils.helpers import load_file, clean_phone, to_excel
+from utils.helpers import clean_phone, to_excel
 import dataframe_image as dfi
 import os
 import zipfile
@@ -131,13 +131,22 @@ def show_pos_oos_listing():
             st.warning("Aucun fichier de transactions trouvé")
             st.stop()
 
-        st.success(f"{len(df_trans)} lignes chargées")
-
         # Nettoyage des numéros From et To
         if 'From' in df_trans.columns:
             df_trans['From_clean'] = df_trans['From'].apply(clean_phone)
         if 'To' in df_trans.columns:
             df_trans['To_clean'] = df_trans['To'].apply(clean_phone)
+        
+        
+        # =========================================================
+        # 🧹 SUPPRESSION DES DOUBLONS (CRITIQUE)
+        # =========================================================
+        df_trans = df_trans.drop_duplicates(
+            subset=['Date', 'From_clean', 'To_clean', 'Amount', 'Type'],
+            keep='last'
+        )
+
+        st.info(f"🧹 Après déduplication : {len(df_trans)} lignes")
 
         # Création d'une colonne MSISDN unique à partir de From ou To
         df_trans['MSISDN'] = df_trans['To_clean'].fillna(df_trans['From_clean'])

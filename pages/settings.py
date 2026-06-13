@@ -1,19 +1,19 @@
 import streamlit as st
-from utils.helpers import load_file
-import pandas as pd
 from utils.supabase import handle_upload
 
 def show_settings():
     st.title("⚙️ Settings - Configurations")
     st.markdown("**Chargez ici tous les fichiers et configurations de l'application**")
 
-    tab1, tab2, tab3, tab4, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "Commerciaux", 
         "Caisses", 
         "Zones", 
         "Maître POS", 
+        "Maitre POS centre III",
         "Masters",
-        "CDS"
+        "CDS",
+        "POS relai & Caisses"
     ])
 
     # ===================== ONGLET COMMERCIAUX =====================
@@ -67,6 +67,17 @@ def show_settings():
             session_key="pos_master_df",
             folder_name="maitre_pos"
         )
+    # ===================== ONGLET CDS =====================
+    with tab5:
+        st.subheader("Fichier Maitre POS centre III")
+        
+        handle_upload(
+            tab_title="Fichier Maitre POS centre III",
+            uploader_label="Upload Fichier Maitre POS centre III",
+            uploader_key="maitre_III_file_uploader", 
+            session_key="pos_master_III_df",
+            folder_name="maitre_pos_III"
+        )
 
     
     # ===================== ONGLET Masters =====================
@@ -93,6 +104,19 @@ def show_settings():
             uploader_key="cds_file_uploader", 
             session_key="exclusion_cds",
             folder_name="cds"
+        )
+    
+    # ===================== ONGLET POS RELAIS & CAISSES =====================
+    with tab8:
+        st.subheader("Fichier Configuration POS Relais & Caisses")
+        st.markdown("Colonnes attendues : `MSISDN_PR`, `TERRITOIRE`,`Localisation`, `Nom du point de relais`")
+        
+        handle_upload(
+            tab_title="Fichier POS Relais & Caisses",
+            uploader_label="Upload Fichier POS Relais & Caisses",
+            uploader_key="pos_relay_caisse_file_uploader", 
+            session_key="pos_relay_caisse_df",
+            folder_name="pos_relay_caisse"
         )
 
     st.divider()
