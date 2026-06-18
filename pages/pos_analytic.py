@@ -3,12 +3,42 @@ import streamlit as st
 import pandas as pd
 from utils.helpers import load_file, clean_phone, find_amount_column, to_excel
 from utils.plotting import create_gros_transferts_charts
+from utils.supabase import load_setting
+
+
+def _collect_phone_numbers(df, columns):
+    if df is None or df.empty:
+        return set()
+
+    phone_numbers = set()
+    for col in columns:
+        if col in df.columns:
+            phone_numbers.update(
+                df[col].apply(clean_phone).dropna().astype(str).tolist()
+            )
+    return phone_numbers
+
+
+def _load_excluded_to_phones():
+    excluded = set()
+
+    comm_config = load_setting("commerciaux")
+    excluded.update(_collect_phone_numbers(comm_config, ["Ccial_MSISDN", "Commercial_MSISDN", "NUM"]))
+
+    cds_config = load_setting("cds")
+    excluded.update(_collect_phone_numbers(cds_config, ["NUM", "Ccial_MSISDN", "Commercial_MSISDN"]))
+
+    masters_config = load_setting("masters")
+    excluded.update(_collect_phone_numbers(masters_config, ["NUM", "Ccial_MSISDN", "Commercial_MSISDN"]))
+
+    return {phone for phone in excluded if phone}
+
 
 def show_gros_transferts():
     st.title("Analyse des Gros Transferts")
 
     # Récupération de la liste d'exclusion depuis Settings
-    exclusion_df = st.session_state.get('exclusion_df')
+    exclusion_df = load_setting("caisses")
     if exclusion_df is None:
         st.error("Veuillez charger le fichier **D'exclusion** dans Settings")
         st.stop()
@@ -137,6 +167,10 @@ def show_gros_transferts():
 
                 df_persons['phone_from'] = df_persons.get('From', pd.Series()).apply(clean_phone)
                 df_persons['phone_to'] = df_persons.get('To', pd.Series()).apply(clean_phone)
+
+                excluded_to_phones = _load_excluded_to_phones()
+                if excluded_to_phones:
+                    df_persons = df_persons[~df_persons['phone_to'].isin(excluded_to_phones)].copy()
 
                 targeted_phones = st.session_state.gt_targeted_phones
                 exclusion_set = st.session_state.gt_exclusion_set

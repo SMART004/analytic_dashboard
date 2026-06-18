@@ -1,4 +1,5 @@
 import streamlit as st
+import plotly.express as px
 import pandas as pd
 import numpy as np
 import os
@@ -38,6 +39,80 @@ def format_amount(x):
     if x >= 1_000:
         return f"{x / 1_000:.0f}K"
     return f"{int(x)}"
+
+
+def _standardize_transaction_type(df):
+    if df is None or df.empty or "Type" not in df.columns:
+        return df
+
+    df = df.copy()
+    df["Type"] = df["Type"].astype(str).str.strip()
+    type_map = {
+        "cash out": "Cash out",
+        "cash_out": "Cash out",
+        "cash in": "Cash in",
+        "cash_in": "Cash in",
+        "transfer": "Transfer",
+    }
+    df["Type"] = df["Type"].str.lower().map(type_map).fillna(df["Type"])
+    return df
+
+
+def _extract_name_columns(df):
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    from_cols = ["From Name", "From name", "From_Name", "from_name"]
+    to_cols = ["To Name", "To name", "To_Name", "to_name"]
+
+    df["From_name"] = pd.NA
+    df["To_name"] = pd.NA
+
+    for col in from_cols:
+        if col in df.columns:
+            df["From_name"] = df[col].astype(str).str.strip()
+            break
+
+    for col in to_cols:
+        if col in df.columns:
+            df["To_name"] = df[col].astype(str).str.strip()
+            break
+
+    return df
+
+
+def _match_pr_by_name(df, pr_config):
+    if df is None or df.empty or pr_config is None or pr_config.empty:
+        return df
+
+    df = df.copy()
+    if "Nom du point de relais" not in pr_config.columns:
+        return df
+
+    name_map = (
+        pr_config["Nom du point de relais"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .replace({"": pd.NA})
+    )
+    name_map = pr_config.loc[name_map.notna(), ["Nom du point de relais", "MSISDN_PR_clean"]].copy()
+    name_map["Nom du point de relais"] = name_map["Nom du point de relais"].astype(str).str.strip().str.lower()
+    lookup = name_map.set_index("Nom du point de relais")["MSISDN_PR_clean"].to_dict()
+
+    same_name_cash_out = (
+        df["Type"].eq("Cash out") &
+        df["From_name"].notna() &
+        df["To_name"].notna() &
+        df["From_name"].str.lower().eq(df["To_name"].str.lower())
+    )
+
+    if same_name_cash_out.any():
+        names = df.loc[same_name_cash_out, "From_name"].str.strip().str.lower()
+        df.loc[same_name_cash_out, "MSISDN_PR_clean"] = names.map(lookup)
+
+    return df
 
 
 def style_perf(df):
@@ -408,6 +483,8 @@ def show_performance_pos_caisse():
         df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").abs()
         df["From_clean"] = df["From"].apply(clean_phone)
         df["To_clean"] = df["To"].apply(clean_phone)
+        df = _standardize_transaction_type(df)
+        df = _extract_name_columns(df)
         df = df.dropna(subset=["Date"])
 
         df = df.drop_duplicates(
@@ -478,16 +555,51 @@ def show_performance_pos_caisse():
         
         all_trans = df.copy()
 
+        pr_numbers = set(filtered_config["MSISDN_PR_clean"].dropna().astype(str).tolist())
+        df["From_clean_str"] = df["From_clean"].astype(str)
+        df["To_clean_str"] = df["To_clean"].astype(str)
+        df["MSISDN_PR_clean"] = df["From_clean_str"].where(
+            df["From_clean_str"].isin(pr_numbers),
+            df["To_clean_str"].where(df["To_clean_str"].isin(pr_numbers))
+        )
+
+        df = _match_pr_by_name(df, filtered_config)
+        df = df[df["MSISDN_PR_clean"].notna()].copy()
         df = df.merge(
             filtered_config,
-            left_on="From_clean",
-            right_on="MSISDN_PR_clean",
+            on="MSISDN_PR_clean",
             how="left",
         )
 
         # garder uniquement les transactions provenant
         # des PR/Caisses connus
         df = df[df["MSISDN_PR_clean"].notna()].copy()
+
+        # Graphique de répartition des types de transactions
+        type_summary = (
+            df["Type"]
+            .astype(str)
+            .str.strip()
+            .replace({"nan": "Autre", "None": "Autre", "": "Autre"})
+            .value_counts()
+            .reset_index(name="Count")
+            .rename(columns={"index": "Type"})
+        )
+
+        if not type_summary.empty:
+            st.subheader("Répartition des types de transactions")
+            fig_type = px.bar(
+                type_summary,
+                x="Type",
+                y="Count",
+                title="Répartition des types de transactions",
+                labels={"Type": "Type", "Count": "Nombre de transactions"},
+                text="Count",
+                height=420,
+            )
+            fig_type.update_layout(xaxis_tickangle=-45, yaxis_title="Nombre de transactions")
+            fig_type.update_traces(textposition="outside")
+            st.plotly_chart(fig_type, use_container_width=True)
 
         hvc_numbers = get_hvc_numbers(master_df)
         keys = [
