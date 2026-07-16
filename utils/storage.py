@@ -1,3 +1,5 @@
+# Storage file
+
 import streamlit as st
 import pandas as pd
 import hashlib
@@ -287,106 +289,91 @@ def get_with_folder(bucket, file_path):
 # =====================================================
 # LOAD ALL FILES FROM BUCKET
 # =====================================================
-@st.cache_data(show_spinner=False)
-def get_all_files(bucket):
+@st.cache_data(show_spinner=False, ttl=300)
+def get_all_files(bucket: str) -> pd.DataFrame:
+    """Charge tous les fichiers du bucket (local ou Supabase)."""
+    all_dfs = []
 
     try:
-
-        all_dfs = []
-
         # ==================================
-        # LOCAL
+        # MODE LOCAL
         # ==================================
         if USE_LOCAL_STORAGE:
-
             bucket_folder = DATA_PATH / bucket
 
             if not bucket_folder.exists():
+                st.warning(f"Dossier local non trouvé : {bucket_folder}")
                 return pd.DataFrame()
 
-            files = [
-                f
-                for f in bucket_folder.rglob("*")
-                if f.is_file()
-            ]
+            files = list(bucket_folder.rglob("*"))
 
             for file_path in files:
+                if not file_path.is_file():
+                    continue
 
                 try:
+                    # On crée un objet BytesIO avec .name pour compatibilité
+                    with open(file_path, "rb") as f:
+                        file_bytes = f.read()
 
-                    temp_df = load_file(
-                        str(file_path)
-                    )
+                    file_buffer = BytesIO(file_bytes)
+                    file_buffer.name = file_path.name   # ← Important !
 
-                    if temp_df is None:
+                    temp_df = load_file(file_buffer)
+
+                    if temp_df is None or temp_df.empty:
                         continue
 
-                    temp_df["source_file"] = (
-                        file_path.name
-                    )
-
+                    temp_df["source_file"] = file_path.name
+                    temp_df["source_path"] = str(file_path)
                     all_dfs.append(temp_df)
 
                 except Exception as e:
-
-                    st.warning(
-                        f"Erreur {file_path.name}: {e}"
-                    )
+                    st.warning(f"Erreur lecture {file_path.name}: {e}")
 
         # ==================================
-        # SUPABASE
+        # MODE SUPABASE
         # ==================================
         else:
-
-            files = (
-                supabase.storage
-                .from_(bucket)
-                .list()
-            )
+            try:
+                files = supabase.storage.from_(bucket).list()
+            except Exception as e:
+                st.error(f"Erreur listing Supabase : {e}")
+                return pd.DataFrame()
 
             for f in files:
-
                 file_name = f["name"]
+                try:
+                    downloaded = supabase.storage.from_(bucket).download(file_name)
+                    file_buffer = BytesIO(downloaded)
+                    file_buffer.name = file_name
 
-                downloaded = (
-                    supabase.storage
-                    .from_(bucket)
-                    .download(file_name)
-                )
+                    temp_df = load_file(file_buffer)
 
-                file_buffer = BytesIO(downloaded)
-                file_buffer.name = file_name
+                    if temp_df is None or temp_df.empty:
+                        continue
 
-                temp_df = load_file(file_buffer)
+                    temp_df["source_file"] = file_name
+                    all_dfs.append(temp_df)
 
-                if temp_df is None:
-                    continue
+                except Exception as e:
+                    st.warning(f"Erreur download {file_name}: {e}")
 
-                temp_df["source_file"] = file_name
-
-                all_dfs.append(temp_df)
-
+        # ==================================
+        # FUSION FINALE
+        # ==================================
         if not all_dfs:
             return pd.DataFrame()
 
-        final_df = pd.concat(
-            all_dfs,
-            ignore_index=True
-        )
+        final_df = pd.concat(all_dfs, ignore_index=True)
 
-        final_df.columns = [
-            c.strip()
-            for c in final_df.columns
-        ]
+        # Nettoyage colonnes
+        final_df.columns = [str(c).strip() for c in final_df.columns]
 
         return final_df
 
     except Exception as e:
-
-        st.error(
-            f"Erreur chargement : {str(e)}"
-        )
-
+        st.error(f"Erreur générale get_all_files : {e}")
         return pd.DataFrame()
     
 

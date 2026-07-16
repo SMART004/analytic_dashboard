@@ -200,14 +200,41 @@ def prepare_point_relay_caisse_config(point_relay_caisse_df):
 
 
 def get_hvc_numbers(master_df):
-    if master_df is None or "Segment Group" not in master_df.columns or "MSISDN" not in master_df.columns:
-        return set()
+    if master_df is None:
+        st.error("Le fichier Master POS est manquant dans les configurations.")
+        st.stop()
+        
+    required = ["segment_group", "agent_msisdn"]
+    missing = [col for col in required if col not in master_df.columns]
+    if missing:
+        st.error(f"Le fichier Master POS ne contient pas les colonnes requises : {', '.join(missing)}")
+        st.stop() # Bloque l'exécution pour vous forcer à corriger le fichier
 
     return set(
         master_df[
-            master_df["Segment Group"].astype(str).str.strip().eq("1-HVC")
-        ]["MSISDN"].apply(clean_phone).dropna().astype(str)
+            master_df["segment_group"].astype(str).str.strip().eq("1-HVC")
+        ]["agent_msisdn"].apply(clean_phone).dropna().astype(str)
     )
+
+def get_mvc_lvc_numbers(master_df):
+    if master_df is None:
+        st.error("Le fichier Master POS est manquant dans les configurations.")
+        st.stop()
+
+    required = ["segment_group", "agent_msisdn"]
+    missing = [col for col in required if col not in master_df.columns]
+    if missing:
+        st.error(f"Le fichier Master POS ne contient pas les colonnes requises : {', '.join(missing)}")
+        st.stop()
+
+    # On filtre sur les valeurs exactes de vos segments MVC et LVC
+    # (Ajustez les textes exacts "2-MVC" ou "3-LVC" selon vos données réelles)
+    valid_segments = ["2-MVC", "3-LVC", "MVC", "LVC"] 
+    
+    filtered_df = master_df[
+        master_df["segment_group"].astype(str).str.strip().isin(valid_segments)
+    ]
+    return set(filtered_df["agent_msisdn"].apply(clean_phone).dropna().astype(str))
 
 
 def add_total_row(df, include_trend, include_dotation):
@@ -602,6 +629,8 @@ def show_performance_pos_caisse():
             st.plotly_chart(fig_type, use_container_width=True)
 
         hvc_numbers = get_hvc_numbers(master_df)
+        mvc_lvc_numbers = get_mvc_lvc_numbers(master_df)
+
         keys = [
             "MSISDN_PR_clean",
             "TERRITOIRE",
@@ -617,11 +646,20 @@ def show_performance_pos_caisse():
             & (~df["To_clean"].isin(global_excluded))
         ].copy()
 
-        fd_trans["Segment"] = np.where(
-            fd_trans["To_clean"].isin(hvc_numbers),
-            "HVC",
-            "OTHER"
-        )
+        # Attribution stricte du segment
+        def assign_segment(phone_number):
+            if phone_number in hvc_numbers:
+                return "HVC"
+            elif phone_number in mvc_lvc_numbers:
+                return "OTHER" # Concerne désormais STRICTEMENT les MVC et LVC
+            else:
+                return "UNKNOWN" # Pour les clients sans segment ou hors cible
+
+        fd_trans["Segment"] = fd_trans["To_clean"].apply(assign_segment)
+
+        # IMPORTANT : On ne garde dans le rapport que les segments valides (HVC et OTHER)
+        # On exclut les "UNKNOWN" pour ne pas polluer les résultats
+        fd_trans = fd_trans[fd_trans["Segment"].isin(["HVC", "OTHER"])].copy()
 
         if fd_trans.empty:
             st.warning("Aucune transaction valide apres exclusions.")

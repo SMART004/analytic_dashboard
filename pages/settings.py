@@ -1,3 +1,4 @@
+# Settings page - Configurations
 import streamlit as st
 from utils.supabase import handle_upload
 
