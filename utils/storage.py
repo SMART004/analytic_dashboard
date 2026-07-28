@@ -850,3 +850,60 @@ def get_files_by_month(bucket, selected_month, max_workers=1):
     except Exception as e:
         st.error(f"Erreur générale : {e}")
         return None
+
+
+# =====================================================
+# LIST FILES (Fonction d'alias / compatibilité)
+# =====================================================
+def list_files(bucket):
+    """
+    Retourne la liste des fichiers ou répertoires contenus dans un bucket.
+    """
+    if USE_LOCAL_STORAGE:
+        bucket_folder = DATA_PATH / bucket
+        if not bucket_folder.exists():
+            return []
+        return [
+            f.name for f in bucket_folder.rglob("*") if f.is_file()
+        ]
+    else:
+        try:
+            files = supabase.storage.from_(bucket).list()
+            return [f["name"] for f in files]
+        except Exception as e:
+            st.error(f"Erreur lors de la récupération des fichiers : {e}")
+            return []
+
+
+# =====================================================
+# GET FILE BYTES
+# =====================================================
+def get_file_bytes(bucket: str, file_path: str) -> bytes:
+    """
+    Récupère le contenu brut (bytes) d'un fichier depuis Local ou Supabase.
+    """
+    try:
+        # ==================================
+        # LOCAL
+        # ==================================
+        if USE_LOCAL_STORAGE:
+            local_file = DATA_PATH / bucket / file_path
+            if not local_file.exists():
+                st.error(f"Fichier local introuvable : {local_file}")
+                return None
+            with open(local_file, "rb") as f:
+                return f.read()
+
+        # ==================================
+        # SUPABASE
+        # ==================================
+        else:
+            file_bytes = supabase.storage.from_(bucket).download(file_path)
+            return file_bytes
+
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération des bytes du fichier '{file_path}': {e}")
+        return None
+
+# Alias si la fonction est appelée au pluriel (get_files_bytes) dans certaines pages
+get_files_bytes = get_file_bytes

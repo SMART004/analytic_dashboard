@@ -194,10 +194,21 @@ def prepare_Cds_config(cds_df):
 
 
 def get_hvc_numbers(master_df):
-    """Retourne les numéros HVC à partir du fichier master."""
-    if master_df is None or master_df.empty:
-        st.warning("Fichier master_df vide ou non chargé.")
-        return set()
+    if master_df is None:
+        st.error("Le fichier Master POS est manquant dans les configurations.")
+        st.stop()
+        
+    required = ["segment_group", "agent_msisdn"]
+    missing = [col for col in required if col not in master_df.columns]
+    if missing:
+        st.error(f"Le fichier Master POS ne contient pas les colonnes requises : {', '.join(missing)}")
+        st.stop() # Bloque l'exécution pour vous forcer à corriger le fichier
+
+    return set(
+        master_df[
+            master_df["segment_group"].astype(str).str.strip().eq("1-HVC")
+        ]["agent_msisdn"].apply(clean_phone).dropna().astype(str)
+    )
 
     df = master_df.copy()
 

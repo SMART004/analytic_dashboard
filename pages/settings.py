@@ -6,7 +6,7 @@ def show_settings():
     st.title("⚙️ Settings - Configurations")
     st.markdown("**Chargez ici tous les fichiers et configurations de l'application**")
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "Commerciaux", 
         "Caisses", 
         "Zones", 
@@ -14,7 +14,9 @@ def show_settings():
         "Maitre POS centre III",
         "Masters",
         "CDS",
-        "POS relai & Caisses"
+        "POS relai & Caisses",
+        "Sites Etoudi",
+        "HVC Commercial"
     ])
 
     # ===================== ONGLET COMMERCIAUX =====================
@@ -118,6 +120,32 @@ def show_settings():
             uploader_key="pos_relay_caisse_file_uploader", 
             session_key="pos_relay_caisse_df",
             folder_name="pos_relay_caisse"
+        )
+
+    # ===================== ONGLET SITES ETOUDI =====================
+    with tab9:
+        st.subheader("Fichier Configuration SITES ETOUDI")
+        st.markdown("Colonnes attendues : `dsm_name`, `sitename`, `quartier")
+        
+        handle_upload(
+            tab_title="Fichier sites etoudi",
+            uploader_label="Upload Fichier sites etoudi",
+            uploader_key="sites_etoudi_file_uploader", 
+            session_key="sites_etoudi_df",
+            folder_name="sites_etoudi"
+        )
+    
+    # ===================== ONGLET HVC COMMERCIAL =====================
+    with tab10:
+        st.subheader("Fichier Configuration HVC COMMERCIAL")
+        st.markdown("Colonnes attendues : `Ccial en charge`, `HVC_msisdn`")
+        
+        handle_upload(
+            tab_title="Fichier hvc commercial",
+            uploader_label="Upload Fichier hvc commercial",
+            uploader_key="hvc_commercial_file_uploader", 
+            session_key="hvc_commercial_df",
+            folder_name="hvc_commercial"
         )
 
     st.divider()
