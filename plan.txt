@@ -1,0 +1,239 @@
+Tu es CTO / architecte logiciel / data engineer. Je te confie la refonte complète 
+(architecture MVC) de mon application Streamlit de Business Intelligence pour le 
+pilotage d'un réseau de distribution Mobile Money (PDV/Agents, Commerciaux terrain, 
+zones/clusters, transactions Cash In/Cash Out/Transfer, ruptures de stock OOS, 
+segmentation HVC), avec migration du stockage fichiers vers SQLite.
+
+=====================================================================
+RÈGLES DE TRAVAIL — À RESPECTER STRICTEMENT
+=====================================================================
+1. Tu travailles TÂCHE PAR TÂCHE, dans l'ordre listé plus bas. Une tâche = un module 
+   fini et validable, jamais plusieurs modules à moitié faits en parallèle.
+2. À la fin de CHAQUE tâche : tu t'arrêtes, tu résumes ce qui a été fait/créé/
+   supprimé, et tu attends ma validation avant de passer à la suivante.
+3. Si une tâche est trop grosse pour tenir dans une seule réponse, découpe-la 
+   toi-même en sous-tâches explicites et annonce le découpage avant de commencer, 
+   pour éviter de tomber en panne de tokens sur un module non fini.
+4. AVANT toute décision de schéma ou d'architecture (Tâche 0 incluse), lis 
+   intégralement et minutieusement CHAQUE fichier du projet actuel — y compris ceux 
+   que tu n'as encore que survolés structurellement. Ne suppose jamais une logique 
+   métier que tu n'as pas vue explicitement dans le code. Si un fichier révèle une 
+   règle différente de ce qui est écrit dans ce prompt, signale-le moi et propose 
+   une correction — toute la logique métier décrite ici est un point de départ 
+   modifiable, pas une contrainte figée.
+5. Simplicité et légèreté obligatoires : pas de sur-architecture, pas de framework 
+   lourd sauf justification claire (sqlite3 natif + pandas suffisent, pas d'ORM sauf 
+   si tu juges SQLAlchemy vraiment nécessaire). Peu de KPIs par page, l'essentiel 
+   seulement — les pages ne doivent pas être surchargées. Pas de recalcul de gros 
+   joins à chaque interaction utilisateur : filtre au niveau SQL, pas en mémoire 
+   après coup. Un développeur doit comprendre l'architecture en 10 minutes.
+6. Ne jamais casser une fonctionnalité existante sans me le signaler explicitement 
+   et demander confirmation.
+
+=====================================================================
+CONTEXTE MÉTIER
+=====================================================================
+Field Force Automation / Trade Marketing pour un opérateur Mobile Money :
+- Réseau de PDV/Agents rattachés à une hiérarchie géographique (Zone SA > Territoire 
+  > Secteur/Cluster/Quartier).
+- Commerciaux terrain devant conquérir/animer des PDV dans leur zone assignée, avec 
+  détection d'empiètement entre commerciaux.
+- Transactions Mobile Money : Cash In, Cash Out, Transfer (float/UV), avec des 
+  comptes internes (commerciaux, caisses, masters, CDS) à TOUJOURS exclure des 
+  calculs "POS servis" — une seule règle d'exclusion, appliquée partout, sans 
+  exception.
+- Suivi des ruptures de stock (OOS) par POS, variation dans le temps, segmentation 
+  HVC (High Value Cluster/Customer).
+- Carte de couverture territoriale souhaitée mais NON prioritaire par rapport aux 
+  autres pages.
+
+=====================================================================
+ÉTAT ACTUEL — DIAGNOSTIC DÉJÀ ÉTABLI (base de travail, à confirmer/corriger en 
+Tâche 0 après lecture complète)
+=====================================================================
+- perf.py, dashboard.py et conquete_territoire.py chargent et retraitent CHACUN les 
+  mêmes données brutes, avec des règles d'exclusion et de rattachement zone 
+  légèrement différentes → à unifier.
+- storage.py et data_loader.py dupliquent la même logique de chargement fichier 
+  (list_month_folders, get_files_by_month) avec des comportements différents → 
+  remplacés entièrement par la couche SQLite.
+- supabase.py::load_setting est une 3e implémentation du même problème, spécifique 
+  aux settings.
+- cds_perf.py et pr_caisse_perf.py sont ~85% identiques → à fusionner.
+- conquete_territoire_v3.py n'est importé nulle part dans app.py → fichier mort, 
+  candidat à suppression après vérification qu'aucune logique utile n'y est unique.
+- La fonctionnalité carte (show_pos_map) est commentée dans app.py, jamais 
+  implémentée → à construire, mais en dernier.
+- Exports : 3 implémentations concurrentes existent déjà — dataframe_image + Chrome 
+  (perf.py, cds_perf.py, pr_caisse_perf.py, pos_from_commerciaux.py, fragile en 
+  déploiement) ; un dessin de tableau PNG maison SANS dépendance Chrome dans 
+  variations_hvc.py (déjà identifié comme la meilleure solution, à généraliser) ; 
+  un export ZIP par cluster dans listing_pos_oos.py. De plus, helpers.py::to_excel() 
+  fait un df.to_excel() brut qui NE conserve PAS la mise en forme conditionnelle 
+  (couleurs de seuils) visible à l'écran — à corriger.
+- Seuils métier codés en dur (grille de performance, seuil gros transfert, etc.) → 
+  à externaliser en configuration.
+- session_state sans convention de nommage unifiée entre pages → à standardiser.
+
+=====================================================================
+ARCHITECTURE CIBLE — MVC
+=====================================================================
+/models
+   db.py                  -> connexion SQLite, exécution de requêtes
+   schema.sql              -> définition des tables (v1, modifiable)
+   migrations/              -> scripts .sql versionnés pour faire évoluer le schéma 
+                              sans tout casser
+   pos_model.py, transactions_model.py, oos_model.py, hvc_model.py, 
+   reference_model.py      -> accès données + nettoyage/normalisation propre à 
+                              chaque entité. Aucune page n'écrit de SQL directement.
+
+/controllers
+   dashboard_controller.py, performance_controller.py, conquete_controller.py, 
+   oos_controller.py, map_controller.py
+   -> orchestrent : appellent les models, appliquent les filtres (y compris le 
+      filtre HEURE pour performance_controller), calculent les KPIs via kpis.py, 
+      préparent les données prêtes à afficher
+   kpis.py                 -> calculs de KPI, purs, testables, indépendants de 
+                              Streamlit
+   exclusion.py             -> LA règle d'exclusion globale, unique, utilisée par 
+                              tous les controllers concernés
+   geo.py                   -> clustering géographique (utilisé uniquement par 
+                              map_controller, non prioritaire)
+
+/views
+   dashboard_view.py, performance_view.py, conquete_view.py, oos_view.py, 
+   map_view.py, settings_view.py
+   -> uniquement du rendu Streamlit : reçoivent des données déjà prêtes du 
+      controller, affichent. Pas de logique métier, pas de SQL. Pages volontairement 
+      légères (peu de sections, peu de KPIs par écran).
+
+/services
+   export_service.py        -> UN SEUL point d'export pour toute l'app :
+                              - to_csv(df)
+                              - to_excel(df, styles) : reconstruit le fichier Excel 
+                                cellule par cellule (openpyxl) en respectant 
+                                EXACTEMENT la mise en forme conditionnelle affichée 
+                                à l'écran (couleurs de seuil, ligne de total, 
+                                en-têtes) — jamais un df.to_excel() brut
+                              - to_image(df, styles) : génère un PNG fidèle au 
+                                tableau tel qu'affiché (mêmes couleurs, mêmes 
+                                libellés, même mise en page), en généralisant 
+                                l'approche SANS Chrome déjà développée dans 
+                                variations_hvc.py — pas dataframe_image
+                              Toutes les vues utilisent uniquement ce service pour 
+                              leurs boutons CSV / Excel / Image, y compris les 
+                              exports groupés (ZIP multi-fichiers par cluster/
+                              territoire) déjà présents ailleurs.
+
+/config
+   settings.py               -> seuils métier externalisés (grille perf, seuils 
+                              OOS, seuil gros transfert, etc.), modifiables sans 
+                              redéploiement
+
+/ingestion
+   ingest.py                 -> lit les fichiers Excel/CSV sources et alimente 
+                              SQLite (remplace storage.py + data_loader.py + partie 
+                              de supabase.py). Nettoyage (téléphones, types de 
+                              transaction) fait UNE SEULE FOIS ici, à l'insertion.
+
+/tests
+   -> tests unitaires sur controllers/kpis.py, controllers/exclusion.py, et 
+      services/export_service.py
+
+Fichiers à supprimer après migration (uniquement après confirmation explicite de 
+ma part) : storage.py, data_loader.py, conquete_territoire_v3.py, dataframe_image 
+(dépendance Chrome), et toute fonction dupliquée une fois centralisée 
+(format_amount, style_perf, load_perf_folders, _load_excluded_to_phones, etc.).
+
+=====================================================================
+DÉCOUPAGE EN TÂCHES — DANS CET ORDRE
+=====================================================================
+
+TÂCHE 0 — Lecture exhaustive + Schéma SQLite
+Relis intégralement TOUS les fichiers du projet (pas seulement leur structure). 
+Confirme ou corrige les hypothèses métier posées dans ce prompt. Propose ensuite 
+le schéma complet (tables, clés, index) : pos (référentiel avec zone/territoire/
+cluster), commerciaux, transactions (type, montant, from, to, DATE+HEURE, 
+source_file), exclusions_reference, oos_listing, hvc_segmentation. La colonne 
+horodatage des transactions doit conserver l'heure pour permettre le filtre par 
+heure sur les pages de performance uniquement. Justifie chaque choix, précise que 
+le schéma est une v1 modifiable. Attends ma validation avant de créer le moindre 
+fichier.
+
+TÂCHE 1 — models/ : ingestion + accès données
+ingestion/ingest.py pour charger l'historique existant dans SQLite (réutilise la 
+déduplication par hash déjà présente dans storage.py, ne la réinvente pas). 
+models/*.py pour les fonctions de lecture paramétrées par filtres (période, zone, 
+territoire, cluster, commercial, segment HVC, et heure pour les entités de 
+performance). Aucune page ne doit plus faire de SELECT ou de pandas.concat brut.
+
+TÂCHE 2 — controllers/exclusion.py et controllers/kpis.py
+Centralise la règle d'exclusion globale (choisis/justifie laquelle des 5 versions 
+actuelles est la bonne, ou propose une version corrigée si aucune n'est 
+complètement juste) et chaque KPI de la liste ci-dessous, sous forme de fonctions 
+pures testables.
+
+TÂCHE 3 — services/export_service.py (couche transverse)
+1. Audit des 3 méthodes d'export actuelles (dataframe_image+Chrome, dessin PNG 
+   maison de variations_hvc.py, export ZIP par cluster de listing_pos_oos.py). 
+   Confirme que l'approche sans Chrome est la référence à généraliser.
+2. Construis les 3 fonctions génériques (csv/excel/image), prenant en entrée un 
+   DataFrame et sa règle de mise en forme conditionnelle, pour que chaque export 
+   soit un miroir exact du tableau affiché à l'écran.
+3. Conserve la capacité d'export groupé (ZIP multi-fichiers).
+4. Ne remplace pas encore les imports dans les pages existantes (ce sera fait page 
+   par page, tâche par tâche, plus bas) — ce service est prêt à être consommé.
+
+TÂCHE 4 — Dashboard (controller + view)
+KPIs essentiels seulement, classement des sites/clusters. Utilise 
+controllers/kpis.py et services/export_service.py pour les exports.
+
+TÂCHE 5 — Fusion des pages de performance
+Fusionne cds_perf.py + pr_caisse_perf.py (+ perf.py si pertinent après lecture) en 
+un performance_controller.py paramétré par segment + une performance_view.py 
+commune. Ajoute le filtre HEURE ici spécifiquement (nulle part ailleurs). Branche 
+les exports sur services/export_service.py, en supprimant dataframe_image de ces 
+pages.
+
+TÂCHE 6 — Conquête de territoire (controller + view)
+Reconstruit sur models/controllers, en confirmant après lecture complète si la 
+logique d'empiètement actuelle est correcte ou doit être ajustée.
+
+TÂCHE 7 — OOS / HVC (controller + view)
+listing_pos_oos.py + variations_hvc.py reconstruits sur la même base, exports 
+branchés sur le service unique.
+
+TÂCHE 8 — Harmonisation des filtres
+Audit de tous les filtres par page : uniformise pour qu'ils s'appliquent au niveau 
+SQL avant tout calcul, avec la même sémantique partout. Confirme que le filtre 
+heure n'apparaît que sur les pages de performance.
+
+TÂCHE 9 — Carte dynamique (NON prioritaire — uniquement après validation de toutes 
+les tâches précédentes)
+Clusters/quartiers avec niveau de OOS et nombre de POS non touchés restants. 
+Propose l'option la plus légère à maintenir (folium ou pydeck).
+
+TÂCHE 10 — Nettoyage final
+Liste précise et justifiée des fichiers à supprimer (storage.py, data_loader.py, 
+conquete_territoire_v3.py, dataframe_image, fonctions dupliquées). Suppression 
+uniquement après ma confirmation explicite.
+
+TÂCHE 11 — Tests de non-régression
+Tests pytest garantissant que les mêmes filtres produisent les mêmes totaux sur 
+toutes les pages concernées, et que les exports (csv/excel/image) reflètent bien 
+les données et la mise en forme affichées.
+
+=====================================================================
+KPIs DE RÉFÉRENCE (liste de départ, ajustable après lecture complète des fichiers 
+en Tâche 0)
+=====================================================================
+- Taux de couverture réseau, POS non touchés (global + par cluster/site)
+- Niveau de OOS actuel + variation dans le temps, par cluster/site
+- Day HVC
+- PDV touchés/non touchés, nouveaux, perdus (conquête)
+- Taux d'empiètement entre commerciaux
+- Montant distribué, Cash In, Cash Out, Rotation moyenne
+- Classement des sites/clusters (meilleurs et pires, sur couverture + OOS)
+
+Commence par la TÂCHE 0 : relis tout le projet en détail, confirme ou corrige nos 
+hypothèses métier, puis propose le schéma. Attends ma validation avant tout code.

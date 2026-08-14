@@ -374,6 +374,10 @@ def show_pos_oos_listing():
         "🎯 Filtre Segment", segment_list, default=hvc_segments_default, key="oos_segment_filter"
     )
 
+    st.sidebar.markdown("---")
+    ccial_list = ["Toutes"] + sorted(df_oos['Ccial en charge'].dropna().unique().tolist())
+    selected_ccial = st.sidebar.selectbox("Ccial", ccial_list, key="oos_ccial_filter")
+
     territory_list_full = sorted(df_oos["Territory"].dropna().unique().tolist()) if "Territory" in df_oos.columns else []
     selected_territories = st.sidebar.multiselect("🌍 Filtre Territoire", territory_list_full, default=territory_list_full, key="oos_territory_multi_filter")
 
@@ -406,6 +410,8 @@ def show_pos_oos_listing():
         display_df = display_df[display_df["Cluster"] == selected_isl]
     if selected_site != "Toutes":
         display_df = display_df[display_df["Locality"] == selected_site]
+    if selected_ccial != "Toutes":
+            display_df = display_df[display_df["Ccial en charge"] == selected_ccial]
     if selected_segments:
         display_df = display_df[display_df["Segment group"].isin(selected_segments)]
     if selected_territories:

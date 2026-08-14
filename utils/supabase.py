@@ -3,6 +3,7 @@ import pandas as pd
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
+import hashlib
 from io import BytesIO
 from utils.config_storage import USE_LOCAL_STORAGE, SETTINGS_PATH
 
@@ -46,11 +47,14 @@ def save_file(file, folder_name):
         with open(filepath, "wb") as f:
             f.write(file.getbuffer())
 
+        get_file_from_supabase.clear()
         return str(filepath)
 
     else:
 
-        return upload_to_supabase(file, folder_name)
+        saved_path = upload_to_supabase(file, folder_name)
+        get_file_from_supabase.clear()
+        return saved_path
 
 
 def load_setting(folder_name):
@@ -175,12 +179,19 @@ def handle_upload(
         type=["xlsx", "xls", "csv"]
     )
 
-    if uploaded_file:
+    uploaded = False
 
-        save_file(
-            uploaded_file,
-            folder_name
-        )
+    if uploaded_file:
+        upload_sig = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+        upload_state_key = f"{uploader_key}_last_uploaded_sig"
+
+        if st.session_state.get(upload_state_key) != upload_sig:
+            save_file(
+                uploaded_file,
+                folder_name
+            )
+            st.session_state[upload_state_key] = upload_sig
+            uploaded = True
 
         st.session_state[session_key] = load_setting(
             folder_name
@@ -195,3 +206,5 @@ def handle_upload(
 
         if df is not None:
             st.session_state[session_key] = df
+
+    return uploaded

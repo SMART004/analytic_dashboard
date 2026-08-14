@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from io import BytesIO
 
+from controllers.exclusion import get_excluded_msisdns
 from utils.storage import upload_file, get_all_files
 from utils.helpers import clean_phone
 from utils.supabase import load_setting
@@ -99,6 +100,18 @@ def _safe_setting_df(name: str) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=300)
 def load_transactions() -> pd.DataFrame:
+    try:
+        from models.transactions_model import get_transactions
+
+        df_sql = get_transactions(tx_types=["Transfer"], min_amount=10000)
+        if df_sql is not None and not df_sql.empty:
+            df_sql = df_sql.rename(columns={"From_clean": "From", "To_clean": "To"})
+            return df_sql
+    except Exception as exc:
+        st.warning(f"Chargement SQLite indisponible, repli sur les fichiers ({exc})")
+
+    # Repli fichiers explicite (pas un except silencieux) : uniquement si 
+    # SQLite est vraiment vide, pas en cas d'erreur masquée.
     df = get_all_files(BUCKET_TRANSACTIONS)
     if df is None or df.empty:
         return pd.DataFrame()
@@ -177,11 +190,17 @@ def _prepare_commerciaux(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def charger_referentiels() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Retourne (pdv, comm) prêts à l'emploi.
-    pdv contient zone, Zone_SA_Normalisee, agent_msisdn.
-    comm contient Ccial_MSISDN, Zone_SA_Normalisee, Nom_Ccial, Zone_Centre.
-    """
+    try:
+        from models.pos_model import get_all_pos
+        from models.reference_model import get_all_commerciaux
+
+        pdv_sql = get_all_pos()
+        comm_sql = get_all_commerciaux()
+        if pdv_sql is not None and not pdv_sql.empty and comm_sql is not None and not comm_sql.empty:
+            return _prepare_pdv(pdv_sql, ""), _prepare_commerciaux(comm_sql)
+    except Exception as exc:
+        st.warning(f"Chargement SQLite indisponible, repli sur les fichiers ({exc})")
+
     mp2 = _prepare_pdv(_safe_setting_df("maitre_pos"), "Centre II")
     mp3 = _prepare_pdv(_safe_setting_df("maitre_pos_III"), "Centre III")
     pdv = pd.concat([mp2, mp3], ignore_index=True).drop_duplicates()
@@ -1454,13 +1473,13 @@ def render_tableau_strategique(df_tableau: pd.DataFrame):
     )
 
 
-def render_performances_commerciaux(
+def render_couverture_portefeuille_commercial(
     tx: pd.DataFrame,
     pdv: pd.DataFrame,
     comm: pd.DataFrame,
     pdv_ref: pd.DataFrame | None = None,
 ):
-    st.subheader("👤 Performances des commerciaux")
+    st.subheader("👤 Couverture de portefeuille par commercial")
 
     df = analyser_performances_commerciaux(tx, pdv, comm, pdv_ref=pdv_ref)
     if df.empty:
@@ -1573,7 +1592,8 @@ def show_conquete_territoire():
     # Filtres
     filtres = render_filtres(tx_raw, pdv, comm)
 
-    # Enrichissement complet AVANT filtrage
+    excluded_msisdns = get_excluded_msisdns()
+
     tx_enrichi_full = enrichir_transactions(tx_raw, pdv, comm)
 
     if not tx_enrichi_full.empty and "Type" in tx_enrichi_full.columns and "Amount" in tx_enrichi_full.columns:
@@ -1582,6 +1602,8 @@ def show_conquete_territoire():
             (tx_enrichi_full["Amount"] > 10000)
         ]
 
+    if not tx_enrichi_full.empty and "To_clean" in tx_enrichi_full.columns and excluded_msisdns:
+        tx_enrichi_full = tx_enrichi_full[~tx_enrichi_full["To_clean"].isin(excluded_msisdns)].copy()
     # Filtre période courante
     tx_f, pdv_f, comm_f = appliquer_filtres(tx_enrichi_full, pdv, comm, filtres, include_date=True)
 
@@ -1601,6 +1623,14 @@ def show_conquete_territoire():
 
         if not tx_prec_raw.empty:
             tx_prec_enrichi = enrichir_transactions(tx_prec_raw, pdv, comm)
+            # AJOUT : mêmes règles que la période courante
+            if "Type" in tx_prec_enrichi.columns and "Amount" in tx_prec_enrichi.columns:
+                tx_prec_enrichi = tx_prec_enrichi[
+                    (tx_prec_enrichi["Type"].astype(str).str.strip().str.upper() == "TRANSFER") &
+                    (tx_prec_enrichi["Amount"] > 10000)
+                ]
+            if "To_clean" in tx_prec_enrichi.columns and excluded_msisdns:
+                tx_prec_enrichi = tx_prec_enrichi[~tx_prec_enrichi["To_clean"].isin(excluded_msisdns)].copy()
             tx_prec_f, _, _ = appliquer_filtres(tx_prec_enrichi, pdv, comm, filtres, include_date=False)
 
     # Calculs
@@ -1608,19 +1638,6 @@ def show_conquete_territoire():
     df_zone = analyser_zones_sa(tx_f, pdv_f, comm_f, tx_prec_f if not tx_prec_f.empty else None, pdv_ref=pdv)
     df_tab = construire_tableau_strategique(tx_f, pdv_f, comm_f, tx_prec_f if not tx_prec_f.empty else None, pdv_ref=pdv)
 
-    # with st.expander("🔧 Debug sa_incharge COMPLET"):
-    #     if "sa_incharge" in pdv.columns:
-    #         st.write("Valeurs brutes:", pdv_f["sa_incharge"].value_counts().to_dict())
-    #     if "Zone_SA_Normalisee" in pdv_f.columns:
-    #         st.write("Valeurs normalisées:", pdv_f["Zone_SA_Normalisee"].value_counts().to_dict())
-        
-    #     # Vérifier les PDV FLASH spécifiquement
-    #     flash_pdv = pdv_f[pdv_f["Zone_SA_Normalisee"] == "ETS FLASH SERVICES"]
-    #     st.write(f"PDV FLASH après normalisation: {len(flash_pdv)}")
-        
-    #     # Vérifier leur centre
-    #     if "zone" in pdv.columns:
-    #         st.write("Centre des PDV FLASH:", flash_pdv["zone"].unique().tolist())
 
     # Onglets
     tabs = st.tabs([
@@ -1630,7 +1647,7 @@ def show_conquete_territoire():
         "🌍 Géographie",
         "📈 Évolution",
         "📋 Tableau stratégique",
-        "👤 Performances commerciaux",
+        "👤 Couverture de portefeuille par commercial",
         "📁 Upload",
     ])
 
@@ -1647,6 +1664,6 @@ def show_conquete_territoire():
     with tabs[5]:
         render_tableau_strategique(df_tab)
     with tabs[6]:
-        render_performances_commerciaux(tx_f, pdv_f, comm_f, pdv_ref=pdv)
+        render_couverture_portefeuille_commercial(tx_f, pdv_f, comm_f, pdv_ref=pdv)
     with tabs[7]:
         render_upload_section()

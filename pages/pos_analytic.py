@@ -4,6 +4,7 @@ import pandas as pd
 from utils.helpers import load_file, clean_phone, find_amount_column, to_excel
 from utils.plotting import create_gros_transferts_charts
 from utils.supabase import load_setting
+from domain.reference import get_global_excluded_numbers
 
 
 def _collect_phone_numbers(df, columns):
@@ -20,18 +21,13 @@ def _collect_phone_numbers(df, columns):
 
 
 def _load_excluded_to_phones():
-    excluded = set()
-
-    comm_config = load_setting("commerciaux")
-    excluded.update(_collect_phone_numbers(comm_config, ["Ccial_MSISDN", "Commercial_MSISDN", "NUM"]))
-
-    cds_config = load_setting("cds")
-    excluded.update(_collect_phone_numbers(cds_config, ["NUM", "Ccial_MSISDN", "Commercial_MSISDN"]))
-
-    masters_config = load_setting("masters")
-    excluded.update(_collect_phone_numbers(masters_config, ["NUM", "Ccial_MSISDN", "Commercial_MSISDN"]))
-
-    return {phone for phone in excluded if phone}
+    return get_global_excluded_numbers(
+        commerciaux=load_setting("commerciaux"),
+        caisses=load_setting("caisses"),
+        masters=load_setting("masters"),
+        cds=load_setting("cds"),
+        pos_relay_caisse=load_setting("pos_relay_caisse"),
+    )
 
 
 def show_gros_transferts():
@@ -94,14 +90,7 @@ def show_gros_transferts():
                     .reset_index(name='Total_reçu_caisses')
                 )
 
-                # Exclusion
-                df_excl = exclusion_df.copy()
-                if 'NUM' not in df_excl.columns:
-                    st.error("Colonne 'NUM' manquante dans le fichier exclusion")
-                    st.stop()
-
-                df_excl['NUM_clean'] = df_excl['NUM'].apply(clean_phone)
-                exclusion_set = set(df_excl['NUM_clean'].dropna().astype(str))
+                exclusion_set = _load_excluded_to_phones()
 
                 # Personnes ciblées
                 targeted = total_caisses[

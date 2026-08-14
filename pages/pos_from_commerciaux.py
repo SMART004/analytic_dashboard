@@ -8,6 +8,7 @@ import streamlit as st
 
 from utils.helpers import clean_phone, load_file
 from utils.supabase import load_setting
+from domain.reference import normalize_commercial_reference
 
 
 def _first_existing(columns, candidates):
@@ -113,8 +114,7 @@ def _prepare_master(master_df):
 
 
 def _prepare_commercials(comm_config):
-    comm = comm_config.copy()
-    comm.columns = [str(col).strip() for col in comm.columns]
+    comm = normalize_commercial_reference(comm_config)
 
     required = ["Ccial_MSISDN", "Nom_Ccial"]
     missing = [col for col in required if col not in comm.columns]
@@ -122,7 +122,7 @@ def _prepare_commercials(comm_config):
         st.error(f"Colonne(s) manquante(s) dans Configuration Commerciaux: {', '.join(missing)}")
         st.stop()
 
-    comm["Commercial_MSISDN"] = comm["Ccial_MSISDN"].apply(clean_phone)
+    comm["Commercial_MSISDN"] = comm["Ccial_MSISDN"]
     comm = comm[comm["Commercial_MSISDN"].notna()].copy()
 
     for col in ["Zone_Territoire", "Zone_SA"]:

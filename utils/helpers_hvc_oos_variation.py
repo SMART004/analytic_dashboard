@@ -632,6 +632,47 @@ def render_table_image_pages(df: pd.DataFrame, old_label: str, new_label: str, t
     return pages
 
 
+def find_cluster_col(df: pd.DataFrame):
+    for col in df.columns:
+        if isinstance(col, tuple):
+            if "Cluster" in col or "cluster" in col:
+                return col
+        elif col in ["Cluster", "cluster"]:
+            return col
+    return None
+
+
+def export_images_by_clusters_zip(df: pd.DataFrame, old_label: str, new_label: str) -> Optional[bytes]:
+    """Génère des PNGs par Cluster (25 lignes max par image) et les regroupe dans un zip."""
+    if df.empty:
+        st.warning("⚠️ Aucune donnée à exporter.")
+        return None
+
+    cluster_col = find_cluster_col(df)
+    if cluster_col is None:
+        st.error("❌ La colonne 'Cluster' n'a pas été trouvée dans le tableau.")
+        return None
+
+    clusters = sorted(df[cluster_col].dropna().unique().tolist())
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for c in clusters:
+            df_c = df[df[cluster_col] == c].copy()
+            if df_c.empty:
+                continue
+            pages = render_table_image_pages(
+                df_c, old_label, new_label,
+                title_prefix=f"Variation HVC — {c} ({old_label} → {new_label})",
+            )
+            clean_c_name = re.sub(r'[^\w\-_\. ]', '_', str(c))
+            for i, png in enumerate(pages, start=1):
+                suffix = f"_p{i}" if len(pages) > 1 else ""
+                zip_file.writestr(f"variation_cluster_{clean_c_name}{suffix}.png", png)
+
+    return zip_buffer.getvalue()
+
+
 def export_images_by_territories_zip(df: pd.DataFrame, old_label: str, new_label: str) -> Optional[bytes]:
     """Génère un PNG par Territoire (même design que le tableau) et les regroupe dans un zip."""
     if df.empty:
@@ -794,172 +835,3 @@ def export_df_to_excel_by_territory(df: pd.DataFrame, old_label: str, new_label:
                 _write_sheet_with_conditional_formatting(writer, df_terr, clean_sheet_name, old_label, new_label)
 
     return output.getvalue()
-
-
-# --------------------------------------------------------------------------
-# Interface Streamlit
-# --------------------------------------------------------------------------
-def render_oos_variation() -> None:
-    st.subheader("📊 Suivi des variations #day HVC & %OOS HVC")
-
-    with st.expander("📥 Importer de nouveaux fichiers d'export Excel", expanded=False):
-        uploaded_files = st.file_uploader(
-            "Téléverser un ou plusieurs fichiers Excel (.xlsx, .csv)",
-            type=["xlsx", "csv"],
-            accept_multiple_files=True
-        )
-        if uploaded_files:
-            saved_names = []
-            for ufile in uploaded_files:
-                name = save_data_upload(ufile)
-                if name:
-                    saved_names.append(name)
-            if saved_names:
-                st.success(f"{len(saved_names)} fichier(s) téléversé(s) avec succès !")
-                st.cache_data.clear()
-                st.rerun()
-
-    zones_df = load_zones_mapping_from_setting()
-    dsm_df = load_dsm_mapping_from_settings()
-
-    if zones_df.empty:
-        st.warning("Veuillez charger le fichier Zones dans les paramètres.")
-        return
-
-    uploads = list_data_uploads()
-    if len(uploads) < 2:
-        st.info("Au moins deux exports sont nécessaires pour calculer des variations.")
-        return
-
-    available_dates = sorted(list({u["date"] for u in uploads}), reverse=True)
-    selected_date = st.selectbox("📅 Choisir une date :", available_dates, format_func=lambda d: d.strftime("%d/%m/%Y"))
-
-    date_uploads = [u for u in uploads if u["date"] == selected_date]
-    if len(date_uploads) < 2:
-        st.warning(f"Seulement {len(date_uploads)} export(s) disponible(s) le {selected_date:%d/%m/%Y}.")
-        return
-
-    time_options = {f"{u['time_str']} — {u['clean_name']}": u for u in date_uploads}
-    selected_times = st.multiselect(
-        "🕒 Créneaux à comparer :",
-        options=list(time_options.keys()),
-        default=list(time_options.keys())[-2:]
-    )
-
-    if len(selected_times) < 2:
-        st.info("Sélectionnez au moins deux créneaux horaires.")
-        return
-
-    selected_uploads = sorted([time_options[k] for k in selected_times], key=lambda x: x["timestamp"])
-    pairs = [(selected_uploads[i], selected_uploads[i + 1]) for i in range(len(selected_uploads) - 1)]
-
-    for idx, (older, newer) in enumerate(pairs):
-        old_label, new_label = older["time_str"], newer["time_str"]
-
-        st.markdown(f"### 🔄 Comparaison : **{old_label}** ➔ **{new_label}**")
-
-        old_df = load_site_level_data_bytes(get_file_bytes(STORAGE_FOLDER_DATA, older["name"]))
-        new_df = load_site_level_data_bytes(get_file_bytes(STORAGE_FOLDER_DATA, newer["name"]))
-
-        multi_df = compute_multiindex_variation(old_df, new_df, zones_df, dsm_df, old_label, new_label)
-
-        col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
-
-        with col_f1:
-            territory_col = ("Informations", "TERRITORY")
-            if territory_col in multi_df.columns:
-                all_terrs = sorted(multi_df[territory_col].dropna().unique().tolist())
-                selected_territories = st.multiselect(
-                    "🌍 Filtre Territoire", options=all_terrs, default=all_terrs, key=f"territory_{idx}"
-                )
-            else:
-                selected_territories = []
-
-        with col_f2:
-            cluster_col = ("Informations", "Cluster")
-            if cluster_col in multi_df.columns:
-                if territory_col in multi_df.columns and selected_territories:
-                    sub_df = multi_df[multi_df[territory_col].isin(selected_territories)]
-                    cluster_list = sorted(sub_df[cluster_col].dropna().unique().tolist())
-                else:
-                    cluster_list = sorted(multi_df[cluster_col].dropna().unique().tolist())
-
-                selected_clusters = st.multiselect(
-                    "📍 Filtre Cluster", options=cluster_list, default=cluster_list, key=f"cluster_{idx}"
-                )
-            else:
-                selected_clusters = []
-
-        with col_f3:
-            search_query = st.text_input("🔍 Rechercher un site...", key=f"search_{idx}").strip()
-
-        filtered_df = multi_df.copy()
-        if territory_col in filtered_df.columns and selected_territories:
-            filtered_df = filtered_df[filtered_df[territory_col].isin(selected_territories)]
-        if cluster_col in filtered_df.columns and selected_clusters:
-            filtered_df = filtered_df[filtered_df[cluster_col].isin(selected_clusters)]
-        if search_query:
-            site_col_tuple = ("Informations", SITE_COL)
-            if site_col_tuple in filtered_df.columns:
-                filtered_df = filtered_df[
-                    filtered_df[site_col_tuple].astype(str).str.contains(search_query, case=False, na=False)
-                ]
-
-        tot_day_hvc_old = filtered_df[(f"🕒 {old_label}", "#day HVC")].sum()
-        tot_day_hvc_new = filtered_df[(f"🕒 {new_label}", "#day HVC")].sum()
-        avg_oos_old = filtered_df[(f"🕒 {old_label}", "%OOS HVC")].mean()
-        avg_oos_new = filtered_df[(f"🕒 {new_label}", "%OOS HVC")].mean()
-
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Nombre de sites", len(filtered_df))
-        k2.metric("Moyenne #day HVC", f"{tot_day_hvc_new / max(1, len(filtered_df)):.2f}",
-                   delta=f"{(tot_day_hvc_new - tot_day_hvc_old) / max(1, len(filtered_df)):+.2f}")
-        k3.metric("%OOS HVC Moyen Global", f"{avg_oos_new:.2f}%",
-                   delta=f"{avg_oos_new - avg_oos_old:+.2f}%", delta_color="inverse")
-
-        render_plotly_top_flops(filtered_df)
-
-        st.markdown("#### Export")
-        c_exp1, c_exp2, c_exp3 = st.columns(3)
-
-        with c_exp1:
-            excel_bytes = export_df_to_excel_by_territory(filtered_df, old_label, new_label)
-            st.download_button(
-                label="📊 Excel (par Territoires)",
-                data=excel_bytes,
-                file_name=f"variation_hvc_oos_{old_label}_to_{new_label}_{selected_date}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"download_excel_territoires_{idx}"
-            )
-
-        with c_exp2:
-            current_view_png = render_table_image(
-                filtered_df, old_label, new_label,
-                title=f"Variation %OOS HVC — {old_label} → {new_label}",
-            )
-            st.download_button(
-                label="🖼️ Image PNG (vue actuelle)",
-                data=current_view_png,
-                file_name=f"variation_hvc_oos_{old_label}_to_{new_label}_{selected_date}.png",
-                mime="image/png",
-                key=f"download_png_current_{idx}"
-            )
-
-        with c_exp3:
-            zip_bytes = export_images_by_territories_zip(filtered_df, old_label, new_label)
-            if zip_bytes:
-                st.download_button(
-                    label="📸 Images PNG par Territoire (ZIP)",
-                    data=zip_bytes,
-                    file_name=f"captures_territoires_{old_label}_to_{new_label}.zip",
-                    mime="application/zip",
-                    key=f"download_zip_territoires_{idx}"
-                )
-
-        st.dataframe(
-            get_formatted_styler(filtered_df, old_label, new_label),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.divider()

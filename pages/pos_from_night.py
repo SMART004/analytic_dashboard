@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from utils.helpers import clean_phone, to_excel
 from utils.supabase import load_setting
+from domain.reference import get_global_excluded_numbers
 
 BUCKET_NAME = "pos-night-result-files"
 BUCKET_NAME_COMMERCIAL_COVERAGE = "pos-commercial-coverage-files"
@@ -139,18 +140,13 @@ def _show_pos_nuit_tab(master_df, comm_config, exclusion_df, exclusion_master, e
         master_df["MSISDN"] = master_df["MSISDN"].astype(str).apply(normalize_numeric_str).apply(clean_phone)
 
         # Exclusions globales
-        excluded_numbers = set()
-
-        if comm_config is not None and "Ccial_MSISDN" in comm_config.columns:
-            excluded_numbers.update(
-                comm_config["Ccial_MSISDN"].astype(str).apply(normalize_numeric_str).apply(clean_phone).tolist()
-            )
-
-        for ex in [exclusion_df, exclusion_master, exclusion_cds]:
-            if ex is not None and "NUM" in ex.columns:
-                excluded_numbers.update(
-                    ex["NUM"].astype(str).apply(normalize_numeric_str).apply(clean_phone).tolist()
-                )
+        excluded_numbers = get_global_excluded_numbers(
+            commerciaux=comm_config,
+            caisses=exclusion_df,
+            masters=exclusion_master,
+            cds=exclusion_cds,
+            pos_relay_caisse=load_setting("pos_relay_caisse"),
+        )
 
         # Identification POS via master
         df_from = df.merge(
@@ -179,37 +175,21 @@ def _show_pos_nuit_tab(master_df, comm_config, exclusion_df, exclusion_master, e
         elif "Name" in df.columns:
             df["POS NAME"] = df["Name"]
         else:
-            df["POS NAME"] = df["POS_MSISDN"]
+            df["POS NAME"] = "Unknown"
 
-        df = df[df["POS_MSISDN"].notna()].copy()
+        # 🎯 Application des exclusions (doit être fait APRÈS attribution des noms)
+        df = df[~df["POS_MSISDN"].isin(excluded_numbers)]
 
-        # Exclusion des comptes administratifs
-        df = df[
-            (~df["To_clean"].isin(excluded_numbers)) &
-            (~df["From_clean"].isin(excluded_numbers)) &
-            (df["To_clean"].notna()) &
-            (df["From_clean"].notna())
-        ].copy()
+        # 🕒 Identification des nuits et jours (après exclusions)
+        night_df = df[df["Hour"].between(19, 23)]
+        day_df = df[df["Hour"].between(0, 5)]
 
-        # Filtres horaires
-        night_df = df[(df["Hour"] >= 19) | (df["Hour"] <= 5)].copy()
-        day_df = df[(df["Hour"] > 5) & (df["Hour"] < 19)].copy()
-
-        # Filtre Segment
-        segment_list = ["Tous"] + sorted(
-            night_df["Segment"].dropna().astype(str).unique().tolist()
-        )
-        selected_segment = st.sidebar.selectbox(
-            "Filtre Segment (POS de Nuit)", segment_list, key="segment_nuit"
-        )
-        if selected_segment != "Tous":
-            night_df = night_df[night_df["Segment"].astype(str) == selected_segment]
-            day_df = day_df[day_df["Segment"].astype(str) == selected_segment]
+        if night_df.empty:
+            st.warning("Aucune transaction de nuit identifiée.")
+            return
 
         # Filtres Zone
-        zone_list = ["Toutes"] + sorted(
-            night_df["Zone"].dropna().astype(str).unique().tolist()
-        )
+        zone_list = ["Toutes"] + sorted(night_df["Zone"].dropna().astype(str).unique().tolist())
         selected_zone = st.sidebar.selectbox(
             "Filtre Zone (POS de Nuit)", zone_list, key="zone_nuit"
         )
