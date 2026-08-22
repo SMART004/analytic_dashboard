@@ -75,6 +75,7 @@ from controllers.exclusion import get_excluded_msisdns
 from models.performance_model import (
     Segment,
     get_cds_referentiel,
+    get_cds_commercial_flows,
     get_commercial_referentiel,
     get_dotation_transactions,
     get_hvc_msisdns,
@@ -173,6 +174,8 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
         table = actor_pool.copy()
         for col in base_cols:
             table[col] = 0
+        if segment == "cds":
+            table = _enrich_cds_metrics(table, filters)
         return PerformanceContext(segment=segment, filters=filters, table=table, message="Aucune transaction sur la periode.")
 
     hvc_set = get_hvc_msisdns()
@@ -231,24 +234,32 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
         top_commerciaux = _rank_top_actors(table, segment)
 
     if segment == "cds":
-        quota = get_hvc_quota_by_cds().rename(columns={"nom_cds": "Actor_Nom"})
-        table = table.merge(quota, on="Actor_Nom", how="left")
-        table["nb_hvc_attribue"] = pd.to_numeric(table.get("nb_hvc_attribue"), errors="coerce").fillna(0).astype(int)
-
-        # Taux couverture quota (%) = HVC_Serve / nb_hvc_attribue * 100.
-        # None (pas 0) si nb_hvc_attribue == 0 : un CDS sans quota attribue n'a pas
-        # un "taux de 0%", il n'a simplement pas de quota — la vue doit afficher
-        # "N/A", pas confondre avec un CDS qui a un quota et ne le sert pas.
-        # La ligne TOTAL doit sommer HVC_Serve et nb_hvc_attribue separement
-        # puis diviser une seule fois — ne jamais moyenner les pourcentages
-        # deja arrondis de cette colonne (biais).
-        table["Taux_Couverture_Quota"] = table.apply(
-            lambda row: round(row["HVC_Serve"] / row["nb_hvc_attribue"] * 100, 1)
-            if row["nb_hvc_attribue"] > 0 else None,
-            axis=1,
-        )
+        table = _enrich_cds_metrics(table, filters)
 
     return PerformanceContext(segment=segment, filters=filters, table=table, top_commerciaux=top_commerciaux)
+
+
+def _enrich_cds_metrics(table: pd.DataFrame, filters: PerformanceFilters) -> pd.DataFrame:
+    table = table.copy()
+    quota = get_hvc_quota_by_cds().rename(columns={"nom_cds": "Actor_Nom"})
+    table = table.merge(quota, on="Actor_Nom", how="left")
+    table["nb_hvc_attribue"] = pd.to_numeric(table.get("nb_hvc_attribue"), errors="coerce").fillna(0).astype(int)
+
+    commercial_flows = get_cds_commercial_flows(
+        start_date=filters.start_date,
+        end_date=filters.end_date,
+        min_amount=MIN_TRANSFER_AMOUNT,
+    )
+    table = table.merge(commercial_flows, on="Actor_MSISDN", how="left")
+    for col in ["FD_Commercial", "Ccial_Serve"]:
+        table[col] = pd.to_numeric(table.get(col), errors="coerce").fillna(0)
+
+    table["Taux_Couverture_Quota"] = table.apply(
+        lambda row: round(row["HVC_Serve"] / row["nb_hvc_attribue"] * 100, 1)
+        if row["nb_hvc_attribue"] > 0 else None,
+        axis=1,
+    )
+    return table
 
 
 # ---------------------------------------------------------------------------

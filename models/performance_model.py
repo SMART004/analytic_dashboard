@@ -195,6 +195,43 @@ def get_hvc_cds_assignments(conn: Optional[sqlite3.Connection] = None) -> pd.Dat
             conn.close()
 
 
+def get_cds_commercial_flows(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> pd.DataFrame:
+    """Montant CDS -> commerciaux et commerciaux distincts servis par CDS."""
+    conn, close = _with_conn(conn)
+    try:
+        where, params = ["t.tx_type = 'Transfer'"], []
+        if start_date:
+            where.append("t.date_only >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("t.date_only <= ?")
+            params.append(end_date)
+        if min_amount is not None:
+            where.append("t.amount >= ?")
+            params.append(min_amount)
+
+        query = f"""
+            SELECT
+                cds.cds_msisdn AS Actor_MSISDN,
+                SUM(t.amount) AS FD_Commercial,
+                COUNT(DISTINCT c.ccial_msisdn) AS Ccial_Serve
+            FROM transactions t
+            INNER JOIN cds_referentiel cds ON t.from_msisdn = cds.cds_msisdn
+            INNER JOIN referentiel_commerciaux c ON t.to_msisdn = c.ccial_msisdn
+            WHERE {' AND '.join(where)}
+            GROUP BY cds.cds_msisdn
+        """
+        return pd.read_sql_query(query, conn, params=params)
+    finally:
+        if close:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Transactions par segment (filtrage SQL complet : date, heure, montant, acteur)
 # ---------------------------------------------------------------------------

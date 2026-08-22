@@ -305,20 +305,36 @@ def _render_image_page(df: pd.DataFrame, style: StyleDict, title: str = "") -> b
             )
             ax.add_patch(rect)
 
-            text = _display_value(value, col, style)
-            align = resolved.get("align") or _image_alignment(value)
-            tx = x + 0.08 if align == "left" else x + width / 2
-            text_obj = ax.text(
-                tx,
-                y + 0.5,
-                _fit_text(text, width, fig_w, total_w, float(style["font_size"])),
-                ha=align,
-                va="center",
-                fontsize=float(style["font_size"]),
-                color=resolved.get("font_color", style["font_color"]),
-                fontweight="bold" if resolved.get("bold") else "normal",
-            )
-            text_obj.set_clip_path(rect)
+            if str(col) == "Historique":
+                symbols = str(value).split()
+                if symbols:
+                    n_sym = len(symbols)
+                    box_w = min(0.22, (width * 0.7) / max(1, n_sym))
+                    box_h = 0.45
+                    gap = 0.05
+                    total_boxes_w = n_sym * box_w + (n_sym - 1) * gap
+                    start_x = x + (width - total_boxes_w) / 2.0
+                    by = y + (1.0 - box_h) / 2.0
+                    for idx_sym, sym in enumerate(symbols):
+                        bx = start_x + idx_sym * (box_w + gap)
+                        color = "#e74c3c" if "🟥" in sym else ("#2ecc71" if "🟩" in sym else "#d1d5db")
+                        patch = Rectangle((bx, by), box_w, box_h, facecolor=color, edgecolor="#ffffff", linewidth=0.6)
+                        ax.add_patch(patch)
+            else:
+                text = _display_value(value, col, style)
+                align = resolved.get("align") or _image_alignment(value)
+                tx = x + 0.08 if align == "left" else x + width / 2
+                text_obj = ax.text(
+                    tx,
+                    y + 0.5,
+                    _fit_text(text, width, fig_w, total_w, float(style["font_size"])),
+                    ha=align,
+                    va="center",
+                    fontsize=float(style["font_size"]),
+                    color=resolved.get("font_color", style["font_color"]),
+                    fontweight="bold" if resolved.get("bold") else "normal",
+                )
+                text_obj.set_clip_path(rect)
             x += width
 
     fig.tight_layout(pad=0.6)

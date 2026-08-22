@@ -20,14 +20,22 @@ def get_oos_filter_options(conn: Optional[sqlite3.Connection] = None) -> dict:
             )
             return sorted({str(r[0]).strip() for r in cursor.fetchall() if r[0]})
 
-        cursor.execute("SELECT MAX(snapshot_date) AS latest FROM listing_oos")
+        cursor.execute("SELECT MAX(snapshot_date) AS latest, MIN(snapshot_date) AS earliest FROM listing_oos")
         row = cursor.fetchone()
 
         cursor.execute("SELECT DISTINCT zone_sa FROM referentiel_pos WHERE zone_sa IS NOT NULL AND zone_sa <> ''")
         zone_sa_list = sorted({str(r[0]).strip() for r in cursor.fetchall() if r[0]})
 
+        latest_val = row["latest"] if row else None
+        earliest_val = row["earliest"] if row else None
+
+        min_date = earliest_val[:10] if earliest_val and len(earliest_val) >= 10 else None
+        max_date = latest_val[:10] if latest_val and len(latest_val) >= 10 else None
+
         return {
-            "latest_snapshot_date": row["latest"] if row else None,
+            "latest_snapshot_date": latest_val,
+            "min_date": min_date,
+            "max_date": max_date,
             "zone": distinct("zone"),
             "territory": distinct("territory"),
             "cluster": distinct("cluster"),
@@ -40,6 +48,8 @@ def get_oos_filter_options(conn: Optional[sqlite3.Connection] = None) -> dict:
 
 def get_oos_listing(
     snapshot_date: Optional[str] = None,
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
     zone: Optional[str] = None,
     zone_sa: Optional[str] = None,
     territory: Optional[str] = None,
@@ -61,6 +71,12 @@ def get_oos_listing(
         if snapshot_date:
             where_clauses.append("l.snapshot_date = ?")
             params.append(snapshot_date)
+        if date_start:
+            where_clauses.append("DATE(l.snapshot_date) >= DATE(?)")
+            params.append(date_start)
+        if date_end:
+            where_clauses.append("DATE(l.snapshot_date) <= DATE(?)")
+            params.append(date_end)
         if zone and zone not in ("Tous", "Toutes"):
             where_clauses.append("l.zone = ?")
             params.append(zone)

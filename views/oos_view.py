@@ -51,7 +51,10 @@ from controllers.oos_controller import (
     enrich_oos_listing_with_deduced_commercials,
     read_tx_files,
     extract_hvc_low_balance_from_tx,
-    inject_into_listing_oos
+    inject_into_listing_oos,
+    get_oos_full_dataset,
+    compute_commercial_ranking,
+    compute_frequently_oos_metrics
 )
 from ingestion.upload_sync import sync_oos_to_sqlite, sync_hvc_variation_to_sqlite
 from services.export_service import to_csv, to_excel, to_grouped_zip, to_image
@@ -105,6 +108,9 @@ _COL_WIDTHS = {
     "Territory": 1.7,
     "Zone": 1.2,
     "Segment group": 1.3,
+    "Rupture": 1.1,
+    "Statut": 1.3,
+    "Historique": 1.8,
     "Day_Target": 1.1,
     "OOS": 1.0,
     "Float": 1.0,
@@ -139,7 +145,15 @@ def _render_pos_table_page(df: pd.DataFrame, title: str = "") -> bytes:
         plt.close(fig)
         return buf.getvalue()
 
-    widths = [_COL_WIDTHS.get(c, 1.3) for c in cols]
+    # Calcul de la largeur dynamique de la colonne Historique selon le nb max de snapshots
+    if "Historique" in cols and not df.empty and "Historique" in df.columns:
+        max_syms = df["Historique"].dropna().apply(lambda v: len(str(v).split())).max()
+        max_syms = max(1, int(max_syms))
+        # 0.20 par carré + 0.04 de gap, minimum 1.0, plafond 8.0
+        hist_width = min(8.0, max(1.0, max_syms * 0.24))
+        widths = [hist_width if c == "Historique" else _COL_WIDTHS.get(c, 1.3) for c in cols]
+    else:
+        widths = [_COL_WIDTHS.get(c, 1.3) for c in cols]
     total_w = sum(widths)
     n_rows = len(df)
 
@@ -189,11 +203,29 @@ def _render_pos_table_page(df: pd.DataFrame, title: str = "") -> bytes:
 
             rect = Rectangle((x, y), w, 1, facecolor=cell_bg, edgecolor=_BORDER, linewidth=0.5)
             ax.add_patch(rect)
-            tx = x + 0.08 if ha == "left" else x + w / 2
-            max_chars = max(3, max_chars_per_col[c] - (1 if ha == "left" else 0))
-            text = _fit_text(raw_text, max_chars)
-            txt = ax.text(tx, y + 0.5, text, ha=ha, va="center", fontsize=_CELL_FONTSIZE, color=text_color)
-            txt.set_clip_path(rect)
+
+            if str(c) == "Historique":
+                symbols = raw_text.split()
+                if symbols:
+                    n_sym = len(symbols)
+                    box_w = min(0.22, (w * 0.7) / max(1, n_sym))
+                    box_h = 0.45
+                    gap = 0.05
+                    total_boxes_w = n_sym * box_w + (n_sym - 1) * gap
+                    start_x = x + (w - total_boxes_w) / 2.0
+                    by = y + (1.0 - box_h) / 2.0
+                    for idx_sym, sym in enumerate(symbols):
+                        bx = start_x + idx_sym * (box_w + gap)
+                        color = "#e74c3c" if "🟥" in sym else ("#2ecc71" if "🟩" in sym else "#d1d5db")
+                        patch = Rectangle((bx, by), box_w, box_h, facecolor=color, edgecolor="#ffffff", linewidth=0.6)
+                        ax.add_patch(patch)
+            else:
+                tx = x + 0.08 if ha == "left" else x + w / 2
+                max_chars = max(3, max_chars_per_col[c] - (1 if ha == "left" else 0))
+                text = _fit_text(raw_text, max_chars)
+                txt = ax.text(tx, y + 0.5, text, ha=ha, va="center", fontsize=_CELL_FONTSIZE, color=text_color)
+                txt.set_clip_path(rect)
+
             x += w
 
     fig.tight_layout(pad=0.6)
@@ -335,7 +367,33 @@ def render_reset_oos_button():
 def _render_layout(options: dict):
     """Filtres communs en haut, puis onglets."""
     st.markdown("### Filtres")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+    min_d_str = options.get("min_date")
+    max_d_str = options.get("max_date")
+    try:
+        min_d = datetime.strptime(min_d_str, "%Y-%m-%d").date() if min_d_str else datetime.now().date()
+        max_d = datetime.strptime(max_d_str, "%Y-%m-%d").date() if max_d_str else datetime.now().date()
+    except Exception:
+        min_d = datetime.now().date()
+        max_d = datetime.now().date()
+
+    c0, c1, c2, c3, c4, c5, c6 = st.columns([1.8, 1.2, 1.2, 1.2, 1.2, 1.2, 1.4])
+
+    with c0:
+        dates_selected = st.date_input(
+            "Plage de dates",
+            value=(min_d, max_d),
+            key="ohv_dates",
+        )
+        if isinstance(dates_selected, (tuple, list)) and len(dates_selected) == 2:
+            date_start = dates_selected[0].strftime("%Y-%m-%d")
+            date_end = dates_selected[1].strftime("%Y-%m-%d")
+        elif isinstance(dates_selected, (tuple, list)) and len(dates_selected) == 1:
+            date_start = dates_selected[0].strftime("%Y-%m-%d")
+            date_end = dates_selected[0].strftime("%Y-%m-%d")
+        else:
+            date_start = min_d_str
+            date_end = max_d_str
 
     with c1:
         zone = st.selectbox("Zone", ["Toutes"] + options.get("zone", []), key="ohv_zone")
@@ -348,8 +406,7 @@ def _render_layout(options: dict):
         zone_sa = st.selectbox("Zone SA", ["Toutes"] + options.get("zone_sa", []), key="ohv_zone_sa")
     with c5:
         segment_opts = ["Tous"] + options.get("segment_group", [])
-        seg_idx = next((i for i, s in enumerate(segment_opts) if str(s).strip().upper() == "1-HVC"), 0)
-        segment_group = st.selectbox("Segment", segment_opts, index=seg_idx, key="ohv_segment")
+        segment_group = st.selectbox("Segment", segment_opts, index=0, key="ohv_segment")
     with c6:
         hour_range = st.slider("Plage horaire", 0, 23, (0, 23), key="ohv_hour")
 
@@ -363,6 +420,7 @@ def _render_layout(options: dict):
     filters = OosHvcFilters(
         zone=zone, territory=territory, cluster=cluster, zone_sa=zone_sa,
         segment_group=segment_group,
+        date_start=date_start, date_end=date_end,
         hour_min=hour_range[0], hour_max=hour_range[1],
     )
     return filters, tab_listing, tab_variation, tab_tx, tab_upload
@@ -423,24 +481,225 @@ def _render_global_status_bar(kpis: OosKpis) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Composants UI — Classement Commerciaux & POS Fréquemment en Rupture
+# ---------------------------------------------------------------------------
+
+def _build_commercial_ranking_chart(df_ranking: pd.DataFrame) -> go.Figure:
+    """Graphique à barres horizontales du Top 10 des commerciaux par Score Final.
+    Badges / codes couleurs:
+    - Vert: Score >= 80 (#27ae60)
+    - Orange: Score 50 - 79.9 (#f39c12)
+    - Rouge: Score < 50 (#e74c3c)
+    """
+    if df_ranking.empty or "Score Final (/100)" not in df_ranking.columns:
+        return go.Figure()
+
+    top10 = df_ranking.head(10).iloc[::-1]  # Inverser pour affichage descendant dans Plotly
+    commerciaux = top10["Commercial"].tolist()
+    scores = top10["Score Final (/100)"].tolist()
+
+    bar_colors = []
+    for s in scores:
+        if s >= 80:
+            bar_colors.append("#27ae60")  # Vert
+        elif s >= 50:
+            bar_colors.append("#f39c12")  # Orange
+        else:
+            bar_colors.append("#e74c3c")  # Rouge
+
+    fig = go.Figure(go.Bar(
+        x=scores,
+        y=commerciaux,
+        orientation="h",
+        marker=dict(color=bar_colors),
+        text=[f"<b>{s:.2f} pts</b>" for s in scores],
+        textposition="outside",
+        hovertemplate="<b>%{y}</b><br>Score Final : %{x:.2f} / 100<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title="<b>Top 10 Commerciaux par Score Final (/100)</b>",
+        xaxis=dict(title="Score Final (/100)", range=[0, 110]),
+        yaxis=dict(title=""),
+        height=380,
+        margin=dict(l=20, r=40, t=50, b=30),
+        template="plotly_white",
+        showlegend=False,
+    )
+    return fig
+
+
+def _render_commercial_ranking_section(df_full: pd.DataFrame) -> None:
+    st.markdown("### 🏆 Classement des Commerciaux")
+    st.caption(
+        "Le **Score Final (/100)** évalue la performance du commercial selon son **Taux de Résolution OOS** "
+        "(70 pts max) et sa **Fréquence Moyenne d'OOS par POS** (Bonus Stabilité 30 pts max)."
+    )
+
+    df_ranking = compute_commercial_ranking(df_full)
+
+    if df_ranking.empty:
+        st.info("Aucune donnée disponible pour établir le classement des commerciaux.")
+        return
+
+    c_chart, c_table = st.columns([1.2, 1.8])
+
+    with c_chart:
+        fig_ranking = _build_commercial_ranking_chart(df_ranking)
+        st.plotly_chart(fig_ranking, use_container_width=True)
+        st.caption("🟢 **Vert (>= 80)**: Excellent | 🟠 **Orange (50-79)**: Moyen | 🔴 **Rouge (< 50)**: À améliorer")
+
+    with c_table:
+        st.markdown("#### Table du Classement")
+
+        def _style_score(val):
+            try:
+                v = float(val)
+                if v >= 80:
+                    return "background-color: #d4edda; color: #155724; font-weight: bold;"
+                elif v >= 50:
+                    return "background-color: #fff3cd; color: #856404; font-weight: bold;"
+                else:
+                    return "background-color: #f8d7da; color: #721c24; font-weight: bold;"
+            except Exception:
+                return ""
+
+        styled = df_ranking.style.applymap(_style_score, subset=["Score Final (/100)"])
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=350)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "📄 CSV Ranking",
+                to_csv(df_ranking),
+                "classement_commerciaux_oos.csv",
+                "text/csv",
+                key="btn_exp_ranking_csv",
+            )
+        with c2:
+            st.download_button(
+                "📊 Excel Ranking",
+                to_excel(df_ranking, sheet_name="Ranking Commerciaux"),
+                "classement_commerciaux_oos.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_exp_ranking_xlsx",
+            )
+
+
+def _render_frequently_oos_section(df_full: pd.DataFrame) -> None:
+    st.markdown("---")
+    st.markdown("### 🚨 POS Fréquemment en Rupture (OOS Frequently)")
+    st.caption(
+        "Suivi des POS en rupture fréquente avec segmentation par comportement (%OOS Moyen, Durée Moyenne OOS, Float Moyen et Site de rattachement)."
+    )
+
+    c1, _ = st.columns([2.5, 1.5])
+    with c1:
+        behavior_filter = st.selectbox(
+            "Filtre de Comportement OOS (Slicing)",
+            [
+                "Tous",
+                "OOS Chroniques",
+                "OOS Récurrents",
+                "OOS Nouveaux",
+                "OOS Occasionnels",
+            ],
+            key="oos_freq_slicing_select",
+            help="Chronique = Rupture lourde ou persistante (>= 3 snapshots consécutifs ou >= 35% du temps). Récurrent = Ruptures répétées sur plusieurs jours ou >= 1.8 fois/jour. Nouveau = 1ère apparition sur le dernier snapshot. Occasionnel = Rupture ponctuelle isolée."
+        )
+
+    df_freq = compute_frequently_oos_metrics(df_full, behavior_filter=behavior_filter)
+
+    if df_freq.empty:
+        st.info("Aucun POS trouvé pour ce filtre de comportement.")
+        return
+
+    st.caption(f"📊 **{len(df_freq):,} POS** listés.")
+
+    def _style_freq(row):
+        styles = [""] * len(row)
+        for i, col in enumerate(row.index):
+            if col == "Statut":
+                val = str(row[col])
+                if val == "Chronique":
+                    styles[i] = "background-color: #f8d7da; color: #721c24; font-weight: bold;"
+                elif val == "Récurrent":
+                    styles[i] = "background-color: #ffe8cc; color: #d9480f; font-weight: bold;"
+                elif val == "Nouveau":
+                    styles[i] = "background-color: #d0ebff; color: #1864ab; font-weight: bold;"
+                else:
+                    styles[i] = "background-color: #fff3cd; color: #856404;"
+            elif col == "%OOS Moyen":
+                try:
+                    v = float(row[col])
+                    if v >= 40:
+                        styles[i] = "background-color: #ffd6d6; color: #9C0006; font-weight: bold;"
+                    elif v >= 20:
+                        styles[i] = "background-color: #fff3bf; color: #7d6608;"
+                except Exception:
+                    pass
+        return styles
+
+    styled = df_freq.style.apply(_style_freq, axis=1)
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=450)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "📄 CSV OOS Frequently",
+            to_csv(df_freq),
+            "pos_frequently_oos.csv",
+            "text/csv",
+            key="btn_exp_freq_csv",
+        )
+    with c2:
+        st.download_button(
+            "📊 Excel OOS Frequently",
+            to_excel(df_freq, sheet_name="POS Frequently OOS"),
+            "pos_frequently_oos.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="btn_exp_freq_xlsx",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Onglet Listing OOS
 # ---------------------------------------------------------------------------
 
 def _render_listing_tab(listing: OosListingContext, base_filters: OosHvcFilters) -> None:
+    # Charge le dataset complet pour la plage temporelle sélectionnée
+    df_full = get_oos_full_dataset(base_filters)
+
+    # Section 1 : Classement des Commerciaux (Nouvelle Section demandée)
+    _render_commercial_ranking_section(df_full)
+
+    # Section 2 : POS Fréquemment en Rupture avec Métriques Avancées & Slicing
+    _render_frequently_oos_section(df_full)
+
+    st.markdown("---")
+    st.markdown("### 📸 Détail du Snapshot Instantané & Couverture")
+
     # Filtres supplementaires propres a cet onglet
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         snapshot_date = st.text_input(
-            "Snapshot (YYYY-MM-DD)", value="", key="oos_snapshot",
+            "Snapshot spécifique (YYYY-MM-DD HH:MM:SS)", value="", key="oos_snapshot",
             help="Laisser vide pour le dernier snapshot disponible."
         )
     with c2:
         segment_options = ["Tous", "1-HVC", "2-MVC", "3-LVC", "4-Others"]
-        seg_idx_listing = next((i for i, s in enumerate(segment_options) if str(s).strip().upper() == "1-HVC"), 0)
-        segment_group = st.selectbox("Segment (listing uniquement)", segment_options, index=seg_idx_listing, key="oos_segment")
+        segment_group = st.selectbox("Segment (listing uniquement)", segment_options, index=0, key="oos_segment")
+    with c3:
+        status_filter = st.selectbox(
+            "Filtrer par Statut",
+            ["Tous", "Chronique", "Récurrent", "Nouveau", "Occasionnel"],
+            index=0,
+            key="oos_status_filter",
+            help="Filtrer le listing des POS par gravité de rupture."
+        )
 
     if listing.is_empty:
-        st.warning(listing.message or "Aucune donnee OOS.")
+        st.warning(listing.message or "Aucune donnée OOS pour ce snapshot.")
         return
 
     # Couverture par cluster
@@ -457,8 +716,22 @@ def _render_listing_tab(listing: OosListingContext, base_filters: OosHvcFilters)
             use_container_width=True, hide_index=True,
         )
 
-    st.markdown("#### Detail des POS en rupture")
+    st.markdown("#### Détail des POS en rupture")
     display = _build_oos_display(listing.table)
+    if status_filter != "Tous" and "Statut" in display.columns:
+        display = display[display["Statut"] == status_filter].reset_index(drop=True)
+
+    # Affichage du récapitulatif dynamique des statuts
+    if not display.empty and "Statut" in display.columns:
+        counts = display["Statut"].value_counts().to_dict()
+        st.caption(
+            f"📊 **Affichés : {len(display):,} POS** | "
+            f"🔴 **{counts.get('Chronique', 0):,} Chroniques** | "
+            f"🟠 **{counts.get('Récurrent', 0):,} Récurrents** | "
+            f"🔵 **{counts.get('Nouveau', 0):,} Nouveaux** | "
+            f"🟡 **{counts.get('Occasionnel', 0):,} Occasionnels**"
+        )
+
     styled = display.style.apply(_oos_column_color, axis=1)
     st.dataframe(styled, use_container_width=True, hide_index=True, height=650)
 
@@ -467,9 +740,7 @@ def _render_listing_tab(listing: OosListingContext, base_filters: OosHvcFilters)
     group_col = "Cluster" if "Cluster" in display.columns else None
     _render_exports_oos(display, styles, group_col)
 
-    # ------------------------------------------------------------------
     # Deduction du commercial pour les POS Non attribués
-    # ------------------------------------------------------------------
     _render_deduced_commercials_section(display)
 
     # ------------------------------------------------------------------
@@ -561,6 +832,11 @@ def _build_oos_display(df: pd.DataFrame) -> pd.DataFrame:
     display["Zone"] = df.get("zone", df.get("Zone", "N/A"))
     display["Segment group"] = df.get("segment_group", df.get("Segment Group", "N/A"))
 
+    # Nouvelles colonnes demandées: Rupture, Statut, Historique (carrés d'évolution)
+    display["Rupture"] = pd.to_numeric(df.get("Rupture", df.get("appearances", 1)), errors="coerce").fillna(1).astype(int)
+    display["Statut"] = df.get("Statut", "Occasionnel")
+    display["Historique"] = df.get("Historique", "🟥")
+
     display["Day_Target"] = pd.to_numeric(df.get("day_target", df.get("Day_Target", 0)), errors="coerce").fillna(0).astype(int)
     display["OOS"] = pd.to_numeric(df.get("oos_pct", df.get("OOS", 0)), errors="coerce").fillna(0).astype(int)
     display["Float"] = pd.to_numeric(df.get("float_amount", df.get("Float", 0)), errors="coerce").fillna(0).astype(int)
@@ -586,6 +862,18 @@ def _oos_column_color(row: pd.Series) -> list[str]:
             styles[i] = "background-color: #FFF9C4; color: #F57F17"
         elif col == "Float":
             styles[i] = "background-color: #FFCDD2; color: #C62828"
+        elif col == "Statut":
+            val = str(row[col])
+            if val == "Chronique":
+                styles[i] = "background-color: #f8d7da; color: #721c24; font-weight: bold;"
+            elif val == "Récurrent":
+                styles[i] = "background-color: #ffe8cc; color: #d9480f; font-weight: bold;"
+            elif val == "Nouveau":
+                styles[i] = "background-color: #d0ebff; color: #1864ab; font-weight: bold;"
+            else:
+                styles[i] = "background-color: #fff3cd; color: #856404;"
+        elif col == "Rupture":
+            styles[i] = "font-weight: bold;"
     return styles
 
 

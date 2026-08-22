@@ -89,6 +89,7 @@ def _render_filters(options: dict[str, Any]) -> PosNonTouchesFilters:
         zone_sa = st.selectbox("Zone SA", ["Toutes"] + list(options.get("zone_sa", [])), key="pnt_zone_sa")
         zone = st.selectbox("Zone", ["Toutes"] + list(options.get("zones", [])), key="pnt_zone")
         territory = st.selectbox("Territoire", ["Toutes"] + list(options.get("territories", [])), key="pnt_territory")
+        cluster = st.selectbox("Cluster", ["Tous"] + list(options.get("clusters", [])), key="pnt_cluster")
 
     return PosNonTouchesFilters(
         start_date=start_date,
@@ -98,6 +99,7 @@ def _render_filters(options: dict[str, Any]) -> PosNonTouchesFilters:
         zone_sa=zone_sa,
         zone=zone,
         territory=territory,
+        cluster=cluster,
     )
 
 
@@ -167,6 +169,7 @@ def _display_table(df: pd.DataFrame) -> pd.DataFrame:
         "Territoire",
         "Zone_SA",
         "Zone",
+        "Cluster",
         "MSISDN intervenant",
         "Nom intervenant",
         "Type intervenant",

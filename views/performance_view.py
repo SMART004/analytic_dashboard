@@ -70,6 +70,8 @@ _SEGMENT_LABELS = {
     "cds": "CDS",
 }
 
+_CDS_DISPLAY_ONLY_COLUMNS = ["FD_Commercial", "Ccial_Serve"]
+
 
 # ---------------------------------------------------------------------------
 # Page principale (3 onglets)
@@ -96,8 +98,23 @@ def _render_segment_tab(segment: Segment) -> None:
     st.divider()
 
     filters = render_performance_filters(segment)
-    context = build_performance_context(filters)
+    context = _build_performance_context_cached(filters)
     render_performance(context)
+
+
+@st.cache_data(show_spinner=False)
+def _load_filter_options_cached(segment: Segment) -> dict[str, Any]:
+    return load_filter_options(segment)
+
+
+@st.cache_data(show_spinner=False)
+def _build_performance_context_cached(filters: PerformanceFilters) -> PerformanceContext:
+    return build_performance_context(filters)
+
+
+@st.cache_data(show_spinner=False)
+def _list_available_folders_cached(segment: Segment) -> list[str]:
+    return list_available_folders(segment)
 
 
 # ---------------------------------------------------------------------------
@@ -124,13 +141,14 @@ def _render_upload_sync_section(segment: Segment) -> None:
                     with st.spinner("Téléversement vers Supabase Storage..."):
                         nb_uploaded = upload_segment_files(segment, uploaded_files)
                         st.success(f"✅ {nb_uploaded} fichier(s) téléversé(s) avec succès.")
+                        st.cache_data.clear()
                         st.rerun()
                 else:
                     st.warning("Veuillez sélectionner au moins un fichier.")
 
         with col_sync:
             st.markdown("##### 2. Synchroniser vers SQLite")
-            available_folders = list_available_folders(segment)
+            available_folders = _list_available_folders_cached(segment)
 
             if not available_folders:
                 st.info("Aucun dossier/mois disponible dans le bucket.")
@@ -151,6 +169,7 @@ def _render_upload_sync_section(segment: Segment) -> None:
                                 f"nouvelle(s) ligne(s) insérée(s) sur {res['lignes_chargees']} "
                                 f"lues ({res['fichiers']} fichier(s))."
                             )
+                            st.cache_data.clear()
                             st.rerun()
                     else:
                         st.warning("Veuillez sélectionner au moins un dossier.")
@@ -161,7 +180,7 @@ def _render_upload_sync_section(segment: Segment) -> None:
 # ---------------------------------------------------------------------------
 
 def render_performance_filters(segment: str) -> PerformanceFilters:
-    options = load_filter_options(segment)
+    options = _load_filter_options_cached(segment)
     min_date = _parse_date(options.get("min_date"))
     max_date = _parse_date(options.get("max_date")) or min_date
     prefix = f"perf_{segment}"
@@ -259,7 +278,8 @@ def render_performance(context: PerformanceContext) -> None:
         st.dataframe(_build_top10_display(context), use_container_width=True, hide_index=True)
 
     st.markdown("#### Export")
-    _render_exports(f"performance_{context.segment}", display_with_total, styles, group_col)
+    export_df = _prepare_export_df(display_with_total, context.segment)
+    _render_exports(f"performance_{context.segment}", export_df, styles, group_col)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +381,8 @@ def _build_cds_display(table: pd.DataFrame) -> pd.DataFrame:
         "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
         "FD_HVC": _to_num(_col(df, "FD_HVC", 0)),
         "HVC_Serve": _to_int(_col(df, "HVC_Serve", 0)),
+        "FD_Commercial": _to_num(_col(df, "FD_Commercial", 0)),
+        "Ccial_Serve": _to_int(_col(df, "Ccial_Serve", 0)),
         "Nb_HVC_Attribue": _to_int(_col(df, "nb_hvc_attribue", 0)),
         "Taux_Couverture_Quota": quota_str,
         # POS_serve/Nouveaux [14h-17h] retires : plus calcules pour CDS
@@ -369,6 +391,12 @@ def _build_cds_display(table: pd.DataFrame) -> pd.DataFrame:
         "Dotation_Montant": _to_num(_col(df, "Dotation_Montant", 0)),
     })
     return display.sort_values(["CDS"]).reset_index(drop=True)
+
+
+def _prepare_export_df(df: pd.DataFrame, segment: str) -> pd.DataFrame:
+    if segment == "cds":
+        return df.drop(columns=_CDS_DISPLAY_ONLY_COLUMNS, errors="ignore")
+    return df
 
 
 def _build_top10_display(context: PerformanceContext) -> pd.DataFrame:

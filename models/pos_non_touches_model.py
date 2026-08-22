@@ -39,6 +39,7 @@ def get_pos_non_touches_filter_options(conn: Optional[sqlite3.Connection] = None
             "zone_sa": values("SELECT DISTINCT zone_sa FROM referentiel_pos WHERE zone_sa IS NOT NULL AND zone_sa <> ''"),
             "zones": values("SELECT DISTINCT zone_centre FROM referentiel_pos WHERE zone_centre IS NOT NULL AND zone_centre <> ''"),
             "territories": values("SELECT DISTINCT zone_territoire FROM referentiel_pos WHERE zone_territoire IS NOT NULL AND zone_territoire <> ''"),
+            "clusters": values("SELECT DISTINCT secteur_cluster FROM referentiel_pos WHERE secteur_cluster IS NOT NULL AND secteur_cluster <> ''"),
         }
     finally:
         if close:
@@ -51,6 +52,7 @@ def get_total_pos_count(
     zone_sa: Optional[str] = None,
     zone: Optional[str] = None,
     territory: Optional[str] = None,
+    cluster: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> int:
     close = False
@@ -58,7 +60,14 @@ def get_total_pos_count(
         conn = get_connection()
         close = True
     try:
-        where, params = _pos_filters(segment=segment, site=site, zone_sa=zone_sa, zone=zone, territory=territory)
+        where, params = _pos_filters(
+            segment=segment,
+            site=site,
+            zone_sa=zone_sa,
+            zone=zone,
+            territory=territory,
+            cluster=cluster,
+        )
         query = f"""
         WITH pos_base AS (
             {_pos_base_sql()}
@@ -82,6 +91,7 @@ def get_pos_non_touches_detail(
     zone_sa: Optional[str] = None,
     zone: Optional[str] = None,
     territory: Optional[str] = None,
+    cluster: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> pd.DataFrame:
     close = False
@@ -89,7 +99,14 @@ def get_pos_non_touches_detail(
         conn = get_connection()
         close = True
     try:
-        pos_where, params = _pos_filters(segment=segment, site=site, zone_sa=zone_sa, zone=zone, territory=territory)
+        pos_where, params = _pos_filters(
+            segment=segment,
+            site=site,
+            zone_sa=zone_sa,
+            zone=zone,
+            territory=territory,
+            cluster=cluster,
+        )
         touched_where = ["t.to_msisdn IS NOT NULL", "TRIM(t.to_msisdn) <> ''"]
         if start_date:
             touched_where.append("COALESCE(t.date_only, DATE(t.tx_date)) >= :start_date")
@@ -166,6 +183,7 @@ def get_pos_non_touches_detail(
             nt.territory AS "Territoire",
             nt.zone_sa AS "Zone_SA",
             nt.zone AS "Zone",
+            nt.cluster AS "Cluster",
             li.intervenant_msisdn AS "MSISDN intervenant",
             li.intervenant_name AS "Nom intervenant",
             li.intervenant_type AS "Type intervenant",
@@ -180,6 +198,7 @@ def get_pos_non_touches_detail(
             DATETIME(li.last_intervention_date) ASC,
             nt.zone_sa,
             nt.territory,
+            nt.cluster,
             nt.site_name
         """
         return pd.read_sql_query(query, conn, params=params)
@@ -198,6 +217,7 @@ def _pos_base_sql() -> str:
             MAX(p.zone_territoire) AS territory,
             MAX(p.zone_sa) AS zone_sa,
             MAX(p.zone_centre) AS zone,
+            MAX(p.secteur_cluster) AS cluster,
             MAX(p.segment_group) AS segment
         FROM referentiel_pos p
         LEFT JOIN sites s ON p.site_key = s.site_key
@@ -213,6 +233,7 @@ def _pos_filters(
     zone_sa: Optional[str] = None,
     zone: Optional[str] = None,
     territory: Optional[str] = None,
+    cluster: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
     where = ["1=1"]
     params: dict[str, Any] = {}
@@ -232,5 +253,8 @@ def _pos_filters(
     if territory and territory not in ("Tous", "Toutes"):
         where.append("pb.territory = :territory")
         params["territory"] = territory
+    if cluster and cluster not in ("Tous", "Toutes"):
+        where.append("pb.cluster = :cluster")
+        params["cluster"] = cluster
 
     return " AND ".join(where), params

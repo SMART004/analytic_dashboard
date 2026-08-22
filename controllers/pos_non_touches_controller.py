@@ -21,6 +21,7 @@ class PosNonTouchesFilters:
     zone_sa: str = "Toutes"
     zone: str = "Toutes"
     territory: str = "Toutes"
+    cluster: str = "Tous"
 
 
 @dataclass
@@ -30,6 +31,7 @@ class PosNonTouchesContext:
     detail: pd.DataFrame = field(default_factory=pd.DataFrame)
     by_zone_sa: pd.DataFrame = field(default_factory=pd.DataFrame)
     by_territory: pd.DataFrame = field(default_factory=pd.DataFrame)
+    by_cluster: pd.DataFrame = field(default_factory=pd.DataFrame)
     by_commercial: pd.DataFrame = field(default_factory=pd.DataFrame)
     inactivity_buckets: pd.DataFrame = field(default_factory=pd.DataFrame)
     export_styles: dict[str, Any] = field(default_factory=dict)
@@ -49,6 +51,7 @@ def load_filter_options() -> dict[str, Any]:
             "zone_sa": [],
             "zones": [],
             "territories": [],
+            "clusters": [],
             "error": str(exc),
         }
 
@@ -61,6 +64,7 @@ def build_pos_non_touches_context(filters: PosNonTouchesFilters) -> PosNonTouche
             zone_sa=_clean_filter(filters.zone_sa),
             zone=_clean_filter(filters.zone),
             territory=_clean_filter(filters.territory),
+            cluster=_clean_filter(filters.cluster, all_labels=("Tous", "Toutes")),
         )
         detail = get_pos_non_touches_detail(
             start_date=filters.start_date,
@@ -70,6 +74,7 @@ def build_pos_non_touches_context(filters: PosNonTouchesFilters) -> PosNonTouche
             zone_sa=_clean_filter(filters.zone_sa),
             zone=_clean_filter(filters.zone),
             territory=_clean_filter(filters.territory),
+            cluster=_clean_filter(filters.cluster, all_labels=("Tous", "Toutes")),
         )
     except Exception as exc:
         return PosNonTouchesContext(
@@ -98,6 +103,7 @@ def build_pos_non_touches_context(filters: PosNonTouchesFilters) -> PosNonTouche
         detail=detail,
         by_zone_sa=_count_by(detail, "Zone_SA", "Zone_SA"),
         by_territory=_count_by(detail, "Territoire", "Territoire"),
+        by_cluster=_count_by(detail, "Cluster", "Cluster"),
         by_commercial=_count_by(detail[detail["Commercial attribue"].notna()], "Commercial attribue", "Commercial"),
         inactivity_buckets=_inactivity_buckets(detail),
         export_styles=_export_styles(),
