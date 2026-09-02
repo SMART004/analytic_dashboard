@@ -19,10 +19,12 @@ dupliquées identifiées en Tâche 5.1) est utilisée pour les 3 segments.
 from __future__ import annotations
 
 import concurrent.futures
+import io
 import logging
 from typing import Literal, Any
 
 import pandas as pd
+import polars as pl
 
 from datetime import date, datetime
 
@@ -177,17 +179,20 @@ def sync_segment_to_sqlite(
 
 
 def sync_oos_to_sqlite(uploaded_file: Any) -> dict:
-    """Lit un fichier OOS uploade, detecte la date snapshot, ingere dans SQLite.
- 
+    """Lit un fichier OOS uploade avec Polars (calamine), detecte la date snapshot,
+    ingere dans SQLite.
+
     Retourne {"lignes_inserees": int, "snapshot_date": str} ou {"error": str}.
     """
- 
     try:
+        raw_bytes = uploaded_file.read()
         if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+            df_pl = pl.read_csv(io.BytesIO(raw_bytes), infer_schema_length=0)
         else:
-            df = pd.read_excel(uploaded_file)
- 
+            df_pl = pl.read_excel(io.BytesIO(raw_bytes), engine="calamine")
+
+        df = df_pl.to_pandas()
+
         # snapshot_date : colonne dediee si presente, sinon date du jour.
         if "snapshot_date" in df.columns:
             snapshot_date = str(df["snapshot_date"].iloc[0])
@@ -195,32 +200,35 @@ def sync_oos_to_sqlite(uploaded_file: Any) -> dict:
             snapshot_date = str(pd.to_datetime(df["date"].iloc[0]).date())
         else:
             snapshot_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
- 
+
         conn = get_connection()
         try:
             inserted = ingest_listing_oos_dataframe(conn, df, snapshot_date)
         finally:
             conn.close()
- 
+
         return {"lignes_inserees": inserted, "snapshot_date": snapshot_date}
- 
+
     except Exception as exc:
         logger.error("sync_oos_to_sqlite : %s", exc)
         return {"error": str(exc)}
  
  
 def sync_hvc_variation_to_sqlite(uploaded_file: Any) -> dict:
-    """Lit un fichier HVC uploade, horodate le snapshot, ingere dans SQLite.
- 
+    """Lit un fichier HVC uploade avec Polars (calamine), horodate le snapshot,
+    ingere dans SQLite.
+
     Retourne {"lignes_inserees": int, "snapshot_timestamp": str} ou {"error": str}.
     """
- 
     try:
+        raw_bytes = uploaded_file.read()
         if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+            df_pl = pl.read_csv(io.BytesIO(raw_bytes), infer_schema_length=0)
         else:
-            df = pd.read_excel(uploaded_file)
- 
+            df_pl = pl.read_excel(io.BytesIO(raw_bytes), engine="calamine")
+
+        df = df_pl.to_pandas()
+
         # Horodatage : extrait du nom de fichier si format ISO reconnu,
         # sinon datetime.now() — meme logique que variations_hvc.py original
         # qui utilisait l'horodatage du fichier Supabase Storage.
@@ -230,15 +238,15 @@ def sync_hvc_variation_to_sqlite(uploaded_file: Any) -> dict:
             snapshot_timestamp = ts_match.group(1).replace("_", "T").replace("-", ":", 2)
         else:
             snapshot_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
- 
+
         conn = get_connection()
         try:
             inserted = ingest_hvc_variation_dataframe(conn, df, snapshot_timestamp, uploaded_file.name)
         finally:
             conn.close()
- 
+
         return {"lignes_inserees": inserted, "snapshot_timestamp": snapshot_timestamp}
- 
+
     except Exception as exc:
         logger.error("sync_hvc_variation_to_sqlite : %s", exc)
         return {"error": str(exc)}

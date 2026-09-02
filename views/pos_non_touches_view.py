@@ -210,13 +210,20 @@ def _render_exports(df: pd.DataFrame, styles: dict[str, Any]) -> None:
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="pnt_export_excel",
     )
-    c3.download_button(
-        "Image",
-        to_image(df, styles, title="Analyse des POS non touches"),
-        "analyse_pos_non_touches.png",
-        "image/png",
-        key="pnt_export_image",
-    )
+    # Export image : isolé derrière un bouton pour ne pas bloquer le chargement
+    with c3:
+        if st.button("🖼️ Générer l'export image", key="pnt_btn_gen_image"):
+            st.session_state["pnt_image_bytes"] = to_image(
+                df, styles, title="Analyse des POS non touches"
+            )
+        if st.session_state.get("pnt_image_bytes"):
+            st.download_button(
+                "⬇️ Télécharger l'image",
+                st.session_state["pnt_image_bytes"],
+                "analyse_pos_non_touches.png",
+                "image/png",
+                key="pnt_export_image",
+            )
 
 
 def _parse_date(value: Any) -> Optional[date]:

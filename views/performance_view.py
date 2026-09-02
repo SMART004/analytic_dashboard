@@ -548,6 +548,7 @@ def _cds_styles() -> dict[str, Any]:
 
 def _render_exports(prefix: str, df: pd.DataFrame, styles: dict[str, Any], group_col: Optional[str]) -> None:
     has_group_export = bool(group_col) and group_col in df.columns
+    # Colonnes : CSV | Excel | Image | ZIP (si groupe)
     cols = st.columns(4 if has_group_export else 3)
 
     cols[0].download_button("CSV", to_csv(df), f"{prefix}.csv", "text/csv", key=f"{prefix}_csv")
@@ -560,23 +561,40 @@ def _render_exports(prefix: str, df: pd.DataFrame, styles: dict[str, Any], group
         key=f"{prefix}_xlsx",
     )
 
-    cols[2].download_button(
-        "Image",
-        to_image(df, styles=styles, title=prefix),
-        f"{prefix}.png",
-        "image/png",
-        key=f"{prefix}_png",
-    )
+    # Export image PNG — isolé derrière un bouton pour ne pas bloquer le chargement
+    with cols[2]:
+        img_key = f"{prefix}_image_bytes"
+        if st.button("🖼️ Générer l'image", key=f"{prefix}_btn_gen_img"):
+            with st.spinner("Génération de l'image..."):
+                st.session_state[img_key] = to_image(df, styles=styles, title=prefix)
+        if st.session_state.get(img_key):
+            st.download_button(
+                "⬇️ Télécharger l'image",
+                st.session_state[img_key],
+                f"{prefix}.png",
+                "image/png",
+                key=f"{prefix}_png",
+            )
 
     if has_group_export:
-        groupable = df[df[group_col].astype(str) != ""]
-        cols[3].download_button(
-            "Images par groupe (ZIP)",
-            to_grouped_zip(groupable, group_col=group_col, export="image", styles=styles, filename_prefix=prefix),
-            f"{prefix}_par_groupe.zip",
-            "application/zip",
-            key=f"{prefix}_zip",
-        )
+        with cols[3]:
+            zip_key = f"{prefix}_zip_bytes"
+            if st.button("🖼️ Générer ZIP par groupe", key=f"{prefix}_btn_gen_zip"):
+                with st.spinner("Génération du ZIP..."):
+                    groupable = df[df[group_col].astype(str) != ""]
+                    st.session_state[zip_key] = to_grouped_zip(
+                        groupable, group_col=group_col,
+                        export="image", styles=styles,
+                        filename_prefix=prefix
+                    )
+            if st.session_state.get(zip_key):
+                st.download_button(
+                    "⬇️ Télécharger le ZIP",
+                    st.session_state[zip_key],
+                    f"{prefix}_par_groupe.zip",
+                    "application/zip",
+                    key=f"{prefix}_zip",
+                )
 
 
 # ---------------------------------------------------------------------------

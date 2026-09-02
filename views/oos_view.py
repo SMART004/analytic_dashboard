@@ -288,8 +288,8 @@ def _render_tx_to_oos_tab() -> None:
     st.markdown("### Transactions → Listing OOS (HVC sous cible)")
     st.caption(
         "Les fichiers ne sont **pas** stockés. "
-        "On extrait les HVC dont la dernière balance (From) est < oos_target, "
-        "puis on les injecte dans le listing OOS avec le snapshot de l’heure d’upload."
+        "Dès l'upload, on extrait directement les HVC dont la dernière balance (From) est < oos_target, "
+        "puis on les injecte dans le listing OOS."
     )
 
     files = st.file_uploader(
@@ -303,10 +303,14 @@ def _render_tx_to_oos_tab() -> None:
         st.info("Chargez un ou plusieurs fichiers de transactions.")
         return
 
-    if st.button("Analyser & injecter dans Listing OOS", type="primary", key="tx_to_oos_run"):
-        with st.spinner("Traitement en mémoire…"):
+    tx_keys = [f"tx_{f.name}_{f.size}" for f in files]
+    last_tx_keys = st.session_state.get("last_processed_tx_files", [])
+    new_tx_files = [f for f, k in zip(files, tx_keys) if k not in last_tx_keys]
+
+    if new_tx_files:
+        with st.spinner("Traitement et injection automatique en mémoire (Polars)…"):
             try:
-                tx_df = read_tx_files(files)
+                tx_df = read_tx_files(new_tx_files)
                 if tx_df.empty:
                     st.warning("Aucun fichier valide.")
                     return
@@ -320,22 +324,23 @@ def _render_tx_to_oos_tab() -> None:
 
                 if pos_oos.empty:
                     st.warning("Aucun HVC avec Balance < oos_target trouvé.")
+                    st.session_state["last_processed_tx_files"] = list(set(last_tx_keys + tx_keys))
                     return
-
-                st.success(f"{len(pos_oos)} HVC sous cible identifiés.")
-                st.dataframe(pos_oos, use_container_width=True, height=350)
 
                 snapshot_ts = datetime.now()
                 n = inject_into_listing_oos(pos_oos, snapshot_ts=snapshot_ts)
+                st.session_state["last_processed_tx_files"] = list(set(last_tx_keys + tx_keys))
+                st.cache_data.clear()
 
                 st.success(
-                    f"{n} POS ajoutés au listing OOS "
+                    f"✅ {n} POS identifiés et ajoutés automatiquement au listing OOS "
                     f"(snapshot : {snapshot_ts.strftime('%Y-%m-%d %H:%M')})."
                 )
-                st.info("Les fichiers transactions n’ont pas été enregistrés.")
+                st.dataframe(pos_oos, use_container_width=True, height=350)
+                st.rerun()
 
             except Exception as e:
-                st.error(f"Erreur : {e}")
+                st.error(f"Erreur d'injection : {e}")
 
 def render_reset_oos_button():
     st.warning("⚠️ Zone de danger")
@@ -351,6 +356,10 @@ def render_reset_oos_button():
         with col1:
             if st.button("✅ Oui, tout vider", key="btn_confirm_yes"):
                 count = clear_listing_oos()
+                st.cache_data.clear()
+                st.session_state["last_ingested_oos_file"] = None
+                st.session_state["last_ingested_hvc_files"] = []
+                st.session_state["last_processed_tx_files"] = []
                 st.success(f"La table a été vidée ({count} enregistrements supprimés).")
                 st.session_state["confirm_clear_oos"] = False
                 st.rerun()
@@ -1588,28 +1597,58 @@ def _variation_styles() -> dict:
 
 def _render_upload_section() -> None:
     st.subheader("Upload OOS")
-    st.caption("Snapshot instantane des POS en rupture.")
-    oos_file = st.file_uploader("Fichier OOS (.xlsx / .csv)", type=["xlsx", "csv"],
-                                 key="oos_upload_file", accept_multiple_files=False)
-    if oos_file and st.button("Ingerer OOS", key="oos_ingest_btn"):
-        with st.spinner("Ingestion OOS..."):
-            result = sync_oos_to_sqlite(oos_file)
-        if result.get("error"):
-            st.error(f"Erreur : {result['error']}")
+    st.caption("Snapshot instantané des POS en rupture. L'ingestion s'exécute automatiquement dès le dépôt du fichier.")
+    oos_file = st.file_uploader(
+        "Fichier OOS (.xlsx / .csv)",
+        type=["xlsx", "csv"],
+        key="oos_upload_file",
+        accept_multiple_files=False,
+    )
+
+    if oos_file:
+        file_key = f"oos_{oos_file.name}_{oos_file.size}"
+        if st.session_state.get("last_ingested_oos_file") != file_key:
+            with st.spinner("Ingestion directe du fichier OOS (Polars)..."):
+                result = sync_oos_to_sqlite(oos_file)
+            if result.get("error"):
+                st.error(f"Erreur d'ingestion : {result['error']}")
+            else:
+                st.session_state["last_ingested_oos_file"] = file_key
+                st.cache_data.clear()
+                st.success(
+                    f"✅ Ingestion automatique réussie : {result.get('lignes_inserees', 0)} lignes "
+                    f"| snapshot : {result.get('snapshot_date')}"
+                )
+                st.rerun()
         else:
-            st.success(f"{result.get('lignes_inserees', 0)} lignes | snapshot : {result.get('snapshot_date')}")
+            st.info(f"Fichier OOS à jour : {oos_file.name}")
 
     st.markdown("---")
     st.subheader("Upload HVC Variations")
-    st.caption("Chaque fichier constitue un snapshot horodate. Minimum 2 pour comparer.")
-    hvc_files = st.file_uploader("Fichier(s) HVC (.xlsx / .csv)", type=["xlsx", "csv"],
-                                   key="hvc_upload_files", accept_multiple_files=True)
-    if hvc_files and st.button("Ingerer HVC", key="hvc_ingest_btn"):
-        with st.spinner(f"Ingestion de {len(hvc_files)} fichier(s)..."):
-            results = [sync_hvc_variation_to_sqlite(f) for f in hvc_files]
-        errors = [r.get("error") for r in results if r.get("error")]
-        inserted = sum(r.get("lignes_inserees", 0) for r in results)
-        if errors:
-            st.error(f"Erreurs : {'; '.join(str(e) for e in errors)}")
-        if inserted:
-            st.success(f"{inserted} lignes inserees sur {len(hvc_files)} fichier(s).")
+    st.caption("Chaque fichier constitue un snapshot horodaté. Ingestion automatique dès l'upload.")
+    hvc_files = st.file_uploader(
+        "Fichier(s) HVC (.xlsx / .csv)",
+        type=["xlsx", "csv"],
+        key="hvc_upload_files",
+        accept_multiple_files=True,
+    )
+
+    if hvc_files:
+        hvc_keys = [f"hvc_{f.name}_{f.size}" for f in hvc_files]
+        last_ingested_hvc = st.session_state.get("last_ingested_hvc_files", [])
+        new_files = [f for f, k in zip(hvc_files, hvc_keys) if k not in last_ingested_hvc]
+
+        if new_files:
+            with st.spinner(f"Ingestion directe de {len(new_files)} nouveau(x) fichier(s) HVC (Polars)..."):
+                results = [sync_hvc_variation_to_sqlite(f) for f in new_files]
+            errors = [r.get("error") for r in results if r.get("error")]
+            inserted = sum(r.get("lignes_inserees", 0) for r in results)
+
+            st.session_state["last_ingested_hvc_files"] = list(set(last_ingested_hvc + hvc_keys))
+            st.cache_data.clear()
+
+            if errors:
+                st.error(f"Erreurs : {'; '.join(str(e) for e in errors)}")
+            if inserted:
+                st.success(f"✅ Ingestion automatique réussie : {inserted} lignes insérées sur {len(new_files)} fichier(s).")
+                st.rerun()

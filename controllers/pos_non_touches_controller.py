@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, date
 from typing import Any, Optional
-
+import numpy as np
 import pandas as pd
+import polars as pl
+import streamlit as st
 
 from models.pos_non_touches_model import (
     get_pos_non_touches_detail,
@@ -39,6 +42,7 @@ class PosNonTouchesContext:
     message: str = ""
 
 
+@st.cache_data(ttl=300, show_spinner=False)  # 5 minutes — options quasi-statiques
 def load_filter_options() -> dict[str, Any]:
     try:
         return get_pos_non_touches_filter_options()
@@ -56,6 +60,7 @@ def load_filter_options() -> dict[str, Any]:
         }
 
 
+@st.cache_data(ttl=120, show_spinner=False)  # 2 minutes — PosNonTouchesFilters est frozen=True (hashable)
 def build_pos_non_touches_context(filters: PosNonTouchesFilters) -> PosNonTouchesContext:
     try:
         total_pos = get_total_pos_count(
@@ -122,20 +127,49 @@ def _clean_filter(value: Optional[str], all_labels: tuple[str, ...] = ("Toutes",
 def _add_inactivity_days(df: pd.DataFrame, end_date: Optional[str]) -> pd.DataFrame:
     if df.empty:
         return df
-    work = df.copy()
-    end_ts = pd.to_datetime(end_date, errors="coerce") if end_date else pd.Timestamp.today().normalize()
-    last = pd.to_datetime(work.get("Derniere date d'intervention"), errors="coerce")
-    work["Delai inactivite (jours)"] = (end_ts - last).dt.days
-    work["Delai inactivite (jours)"] = work["Delai inactivite (jours)"].where(work["Delai inactivite (jours)"] >= 0)
-    return work
+    end_ts = pd.to_datetime(end_date).date() if end_date else datetime.now().date()
+    lf = pl.from_pandas(df).lazy()
+    
+    date_col = "Derniere date d'intervention"
+    if date_col in df.columns:
+        lf = lf.with_columns(
+            pl.col(date_col).str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False).alias("_last_dt")
+        ).with_columns(
+            (pl.lit(end_ts).cast(pl.Date) - pl.col("_last_dt").cast(pl.Date)).dt.total_days().alias("Delai inactivite (jours)")
+        ).with_columns(
+            pl.when(pl.col("Delai inactivite (jours)") >= 0)
+            .then(pl.col("Delai inactivite (jours)"))
+            .otherwise(None)
+            .alias("Delai inactivite (jours)")
+        ).drop(["_last_dt"])
+    return lf.collect().to_pandas()
 
 
 def _build_kpis(df: pd.DataFrame, total_pos: int) -> dict[str, Any]:
-    total_non_touches = int(df["Numero du POS"].nunique()) if not df.empty and "Numero du POS" in df.columns else 0
-    hvc_mask = df["Commercial attribue"].notna() & (df["Commercial attribue"].astype(str).str.strip() != "") if not df.empty else pd.Series(dtype=bool)
-    hvc_non_touches = int(df.loc[hvc_mask, "Numero du POS"].nunique()) if not df.empty else 0
-    commerciaux_impactes = int(df.loc[hvc_mask, "Commercial attribue"].nunique()) if not df.empty else 0
-    avg_inactivity = float(df["Delai inactivite (jours)"].dropna().mean()) if not df.empty and "Delai inactivite (jours)" in df.columns else 0.0
+    if df.empty:
+        return _empty_kpis()
+    
+    lf = pl.from_pandas(df).lazy()
+    
+    total_non_touches = df["Numero du POS"].nunique() if "Numero du POS" in df.columns else 0
+    
+    # HVC mask
+    hvc_non_touches = 0
+    commerciaux_impactes = 0
+    if "Commercial attribue" in df.columns and "Numero du POS" in df.columns:
+        hvc_lf = lf.filter(
+            pl.col("Commercial attribue").is_not_null() &
+            (pl.col("Commercial attribue").cast(pl.Utf8).str.strip_chars() != "")
+        )
+        hvc_agg = hvc_lf.select([
+            pl.col("Numero du POS").n_unique().alias("hvc_nt"),
+            pl.col("Commercial attribue").n_unique().alias("comm_imp")
+        ]).collect()
+        if len(hvc_agg) > 0:
+            hvc_non_touches = int(hvc_agg["hvc_nt"][0])
+            commerciaux_impactes = int(hvc_agg["comm_imp"][0])
+
+    avg_inactivity = float(df["Delai inactivite (jours)"].dropna().mean()) if "Delai inactivite (jours)" in df.columns and len(df["Delai inactivite (jours)"].dropna()) > 0 else 0.0
 
     return {
         "total_pos": total_pos,
@@ -143,7 +177,7 @@ def _build_kpis(df: pd.DataFrame, total_pos: int) -> dict[str, Any]:
         "taux_non_touches": round(total_non_touches / total_pos * 100, 1) if total_pos else 0.0,
         "hvc_non_touches": hvc_non_touches,
         "commerciaux_impactes": commerciaux_impactes,
-        "delai_moyen_inactivite": round(avg_inactivity, 1) if pd.notna(avg_inactivity) else 0.0,
+        "delai_moyen_inactivite": round(avg_inactivity, 1) if not np.isnan(avg_inactivity) else 0.0,
     }
 
 
@@ -159,35 +193,45 @@ def _empty_kpis() -> dict[str, Any]:
 
 
 def _count_by(df: pd.DataFrame, column: str, output_label: str) -> pd.DataFrame:
-    if df.empty or column not in df.columns:
+    if df.empty or column not in df.columns or "Numero du POS" not in df.columns:
         return pd.DataFrame(columns=[output_label, "POS non touches"])
-    work = df.copy()
-    work[column] = work[column].fillna("Non renseigne").astype(str).str.strip()
-    work = work[~work[column].str.lower().isin({"", "nan", "none", "null"})]
-    return (
-        work.groupby(column)["Numero du POS"]
-        .nunique()
-        .reset_index(name="POS non touches")
-        .rename(columns={column: output_label})
-        .sort_values("POS non touches", ascending=False)
-        .reset_index(drop=True)
-    )
+    
+    lf = pl.from_pandas(df).lazy()
+    res = lf.with_columns(
+        pl.col(column).fill_null("Non renseigne").cast(pl.Utf8).str.strip_chars().alias("_grp_col")
+    ).filter(
+        ~pl.col("_grp_col").str.to_lowercase().is_in(["", "nan", "none", "null"])
+    ).group_by("_grp_col").agg(
+        pl.col("Numero du POS").n_unique().alias("POS non touches")
+    ).rename({"_grp_col": output_label}).sort("POS non touches", descending=True).collect()
+    
+    return res.to_pandas()
 
 
 def _inactivity_buckets(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "Delai inactivite (jours)" not in df.columns:
+    if df.empty or "Delai inactivite (jours)" not in df.columns or "Numero du POS" not in df.columns:
         return pd.DataFrame(columns=["Delai", "POS non touches"])
-    work = df[df["Delai inactivite (jours)"].notna()].copy()
-    if work.empty:
-        return pd.DataFrame(columns=["Delai", "POS non touches"])
-    bins = [-1, 7, 14, 30, 10_000]
-    labels = ["0-7 jours", "8-14 jours", "15-30 jours", "30+ jours"]
-    work["Delai"] = pd.cut(work["Delai inactivite (jours)"], bins=bins, labels=labels)
-    return (
-        work.groupby("Delai", observed=False)["Numero du POS"]
-        .nunique()
-        .reset_index(name="POS non touches")
-    )
+    
+    lf = pl.from_pandas(df).lazy()
+    lf = lf.filter(pl.col("Delai inactivite (jours)").is_not_null())
+    
+    res = lf.with_columns(
+        pl.when(pl.col("Delai inactivite (jours)") <= 7).then(pl.lit("0-7 jours"))
+        .when(pl.col("Delai inactivite (jours)") <= 14).then(pl.lit("8-14 jours"))
+        .when(pl.col("Delai inactivite (jours)") <= 30).then(pl.lit("15-30 jours"))
+        .otherwise(pl.lit("30+ jours"))
+        .alias("Delai")
+    ).group_by("Delai").agg(
+        pl.col("Numero du POS").n_unique().alias("POS non touches")
+    ).collect()
+    
+    # Ordonnancement correct des tranches
+    order_map = {"0-7 jours": 0, "8-14 jours": 1, "15-30 jours": 2, "30+ jours": 3}
+    df_res = res.to_pandas()
+    if not df_res.empty:
+        df_res["_order"] = df_res["Delai"].map(order_map).fillna(99)
+        df_res = df_res.sort_values("_order").drop(columns=["_order"]).reset_index(drop=True)
+    return df_res
 
 
 def _export_styles() -> dict[str, Any]:

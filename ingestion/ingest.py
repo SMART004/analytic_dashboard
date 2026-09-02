@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import polars as pl
 
 from models.db import get_connection, execute_schema_file
 from utils.config_storage import DATA_PATH
@@ -659,19 +660,30 @@ def _ingest_transaction_dataframe(
 
 
 def ingest_transaction_file(conn: sqlite3.Connection, file_path: Path) -> int:
-    """Ingère un fichier de transactions unique (chemin local) avec gel du snapshot."""
+    """Ingère un fichier de transactions unique (chemin local) avec gel du snapshot.
+    Utilise Polars+calamine pour la lecture Excel (plus rapide que pandas)."""
     if not file_path.exists():
         return 0
 
-    if file_path.suffix.lower() == ".csv":
-        df = pd.read_csv(file_path)
-    else:
-        df = pd.read_excel(file_path)
+    suffix = file_path.suffix.lower()
+    raw_bytes = file_path.read_bytes()
+    try:
+        if suffix == ".csv":
+            df_pl = pl.read_csv(file_path, infer_schema_length=0)
+        else:
+            df_pl = pl.read_excel(file_path, engine="calamine")
+        df = df_pl.to_pandas()
+    except Exception:
+        # Fallback pandas si Polars échoue (format non supporté)
+        if suffix == ".csv":
+            df = pd.read_csv(file_path)
+        else:
+            df = pd.read_excel(file_path)
 
     if df is None or df.empty:
         return 0
 
-    content_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
+    content_hash = hashlib.md5(raw_bytes).hexdigest()
     return _ingest_transaction_dataframe(conn, df, file_path.name, content_hash)
 
 

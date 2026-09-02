@@ -2,15 +2,13 @@
 import sqlite3
 import pandas as pd
 from typing import Optional, List
+import streamlit as st
 from models.db import get_connection
 
 
-def get_oos_filter_options(conn: Optional[sqlite3.Connection] = None) -> dict:
-    """Dernier snapshot disponible + listes de filtres geo/segment/SA pour la vue OOS."""
-    close = False
-    if conn is None:
-        conn = get_connection()
-        close = True
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_oos_filter_options() -> dict:
+    conn = get_connection()
     try:
         cursor = conn.cursor()
 
@@ -43,10 +41,47 @@ def get_oos_filter_options(conn: Optional[sqlite3.Connection] = None) -> dict:
             "segment_group": distinct("segment_group"),
         }
     finally:
-        if close:
-            conn.close()
+        conn.close()
 
-def get_oos_listing(
+
+def get_oos_filter_options(conn: Optional[sqlite3.Connection] = None) -> dict:
+    """Dernier snapshot disponible + listes de filtres geo/segment/SA pour la vue OOS."""
+    if conn is None:
+        return _fetch_oos_filter_options()
+    cursor = conn.cursor()
+
+    def distinct(col: str) -> list[str]:
+        cursor.execute(
+            f"SELECT DISTINCT {col} FROM listing_oos WHERE {col} IS NOT NULL AND {col} <> ''"
+        )
+        return sorted({str(r[0]).strip() for r in cursor.fetchall() if r[0]})
+
+    cursor.execute("SELECT MAX(snapshot_date) AS latest, MIN(snapshot_date) AS earliest FROM listing_oos")
+    row = cursor.fetchone()
+
+    cursor.execute("SELECT DISTINCT zone_sa FROM referentiel_pos WHERE zone_sa IS NOT NULL AND zone_sa <> ''")
+    zone_sa_list = sorted({str(r[0]).strip() for r in cursor.fetchall() if r[0]})
+
+    latest_val = row["latest"] if row else None
+    earliest_val = row["earliest"] if row else None
+
+    min_date = earliest_val[:10] if earliest_val and len(earliest_val) >= 10 else None
+    max_date = latest_val[:10] if latest_val and len(latest_val) >= 10 else None
+
+    return {
+        "latest_snapshot_date": latest_val,
+        "min_date": min_date,
+        "max_date": max_date,
+        "zone": distinct("zone"),
+        "territory": distinct("territory"),
+        "cluster": distinct("cluster"),
+        "zone_sa": zone_sa_list,
+        "segment_group": distinct("segment_group"),
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_oos_listing(
     snapshot_date: Optional[str] = None,
     date_start: Optional[str] = None,
     date_end: Optional[str] = None,
@@ -57,13 +92,8 @@ def get_oos_listing(
     segment_group: Optional[str] = None,
     sitename: Optional[str] = None,
     is_oos: Optional[int] = None,
-    conn: Optional[sqlite3.Connection] = None,
 ) -> pd.DataFrame:
-    """Récupère les données listing_oos avec enrichissement du nom de site (sitename/locality)."""
-    close = False
-    if conn is None:
-        conn = get_connection()
-        close = True
+    conn = get_connection()
     try:
         where_clauses = ["1=1"]
         params = []
@@ -115,8 +145,86 @@ def get_oos_listing(
         """
         return pd.read_sql_query(query, conn, params=params)
     finally:
-        if close:
-            conn.close()
+        conn.close()
+
+
+def get_oos_listing(
+    snapshot_date: Optional[str] = None,
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
+    zone: Optional[str] = None,
+    zone_sa: Optional[str] = None,
+    territory: Optional[str] = None,
+    cluster: Optional[str] = None,
+    segment_group: Optional[str] = None,
+    sitename: Optional[str] = None,
+    is_oos: Optional[int] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> pd.DataFrame:
+    """Récupère les données listing_oos avec enrichissement du nom de site (sitename/locality)."""
+    if conn is None:
+        return _fetch_oos_listing(
+            snapshot_date=snapshot_date,
+            date_start=date_start,
+            date_end=date_end,
+            zone=zone,
+            zone_sa=zone_sa,
+            territory=territory,
+            cluster=cluster,
+            segment_group=segment_group,
+            sitename=sitename,
+            is_oos=is_oos,
+        )
+    where_clauses = ["1=1"]
+    params = []
+
+    if snapshot_date:
+        where_clauses.append("l.snapshot_date = ?")
+        params.append(snapshot_date)
+    if date_start:
+        where_clauses.append("DATE(l.snapshot_date) >= DATE(?)")
+        params.append(date_start)
+    if date_end:
+        where_clauses.append("DATE(l.snapshot_date) <= DATE(?)")
+        params.append(date_end)
+    if zone and zone not in ("Tous", "Toutes"):
+        where_clauses.append("l.zone = ?")
+        params.append(zone)
+    if zone_sa and zone_sa not in ("Tous", "Toutes"):
+        where_clauses.append("p.zone_sa = ?")
+        params.append(zone_sa)
+    if territory and territory not in ("Tous", "Toutes"):
+        where_clauses.append("l.territory = ?")
+        params.append(territory)
+    if cluster and cluster not in ("Tous", "Toutes"):
+        where_clauses.append("l.cluster = ?")
+        params.append(cluster)
+    if sitename and sitename not in ("Tous", "Toutes"):
+        where_clauses.append("(s.sitename = ? OR l.site_key = ?)")
+        params.extend([sitename, sitename])
+    if segment_group and segment_group not in ("Tous", "Toutes"):
+        where_clauses.append("l.segment_group = ?")
+        params.append(segment_group)
+    if is_oos is not None:
+        where_clauses.append("l.is_oos = ?")
+        params.append(is_oos)
+
+    where_str = " AND ".join(where_clauses)
+    query = f"""
+    SELECT l.msisdn, l.day_target, l.float_amount, l.oos_pct, l.is_oos, l.last_trx_time,
+           l.site_key, COALESCE(s.sitename, l.site_key) AS sitename, COALESCE(s.sitename, l.site_key) AS locality,
+           l.cluster, l.territory, l.zone, p.zone_sa AS zone_sa, l.segment_group, l.snapshot_date
+    FROM listing_oos l
+    LEFT JOIN sites s ON l.site_key = s.site_key
+    LEFT JOIN (
+        SELECT agent_msisdn, MAX(zone_sa) AS zone_sa
+        FROM referentiel_pos
+        GROUP BY agent_msisdn
+    ) p ON l.msisdn = p.agent_msisdn
+    WHERE {where_str}
+    """
+    return pd.read_sql_query(query, conn, params=params)
+
 
 def find_frequent_commercial_for_unassigned_pos(
     unassigned_msisdns: List[str], 
