@@ -29,6 +29,7 @@ from pages.pos_non_touches import show_pos_non_touches
 from pages.settings import show_settings
 from pages.variations_hvc import render_oos_variation
 from pages.oos import show_oos_hvc
+from pages.relationship_map import show_relationship_map
 
 # ── 1. Initialisation de la table Utilisateurs (si inexistante) ────────────────
 init_user_table()
@@ -82,6 +83,12 @@ ALL_NAVIGATION_ITEMS = [
         "icon": "box-seam",
         "permission": "oos_analysis",
         "handler": show_oos_hvc,
+    },
+    {
+        "label": "Cartographie relationnelle",
+        "icon": "diagram-3",
+        "permission": "relationship_map",
+        "handler": show_relationship_map,
     },
     {
         "label": "Listing OOS",

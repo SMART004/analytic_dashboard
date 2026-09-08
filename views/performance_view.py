@@ -107,7 +107,7 @@ def _load_filter_options_cached(segment: Segment) -> dict[str, Any]:
     return load_filter_options(segment)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=120)
 def _build_performance_context_cached(filters: PerformanceFilters) -> PerformanceContext:
     return build_performance_context(filters)
 
@@ -291,7 +291,7 @@ def _build_display(context: PerformanceContext) -> tuple[pd.DataFrame, dict[str,
     if segment == "commercial":
         return _build_commercial_display(context.table), _commercial_styles(), "Zone_Centre"
     if segment == "pr_caisse":
-        return _build_pr_caisse_display(context.table), _pr_caisse_styles(), "Territoire"
+        return _build_pr_caisse_display(context.table, type_point=context.filters.type_point), _pr_caisse_styles(), "Territoire"
     if segment == "cds":
         return _build_cds_display(context.table), _cds_styles(), None
     raise ValueError(f"Segment inconnu: {segment}")
@@ -337,7 +337,7 @@ def _build_commercial_display(table: pd.DataFrame) -> pd.DataFrame:
     return display.sort_values(["Zone_Centre", "Zone_SA", "Commercial"]).reset_index(drop=True)
 
 
-def _build_pr_caisse_display(table: pd.DataFrame) -> pd.DataFrame:
+def _build_pr_caisse_display(table: pd.DataFrame, type_point: str = "Tous") -> pd.DataFrame:
     df = table.copy()
     display = pd.DataFrame({
         "Territoire": _col(df, "Territoire", ""),
@@ -367,6 +367,9 @@ def _build_pr_caisse_display(table: pd.DataFrame) -> pd.DataFrame:
             "HVC:" + _to_int(_col(df, serve_col, 0)).astype(str)
             + " | Other:" + _to_int(_col(df, other_serve_col, 0)).astype(str)
         )
+
+    if type_point == "Caisses" or (not df.empty and "Type_Point" in df.columns and (df["Type_Point"] == "Caisses").all()):
+        display = display.drop(columns=["Dotation_Nom", "Dotation_Montant"], errors="ignore")
 
     return display.sort_values(["Type", "Territoire", "Nom"]).reset_index(drop=True)
 

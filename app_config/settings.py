@@ -40,7 +40,7 @@ ROLE_VIEWER = "viewer"
 
 # Association des rôles aux pages/actions autorisées
 PERMISSIONS = {
-    ROLE_ADMIN: ["dashboard", "performance", "settings", "oos_analysis", "conquete_territoire", "gros_transferts", "pos_non_touches", "pos_commercial"],
-    ROLE_MANAGER: ["dashboard", "performance", "oos_analysis"],
-    ROLE_VIEWER: ["dashboard", "oos_analysis"],
+    ROLE_ADMIN: ["dashboard", "performance", "settings", "oos_analysis", "conquete_territoire", "gros_transferts", "pos_non_touches", "pos_commercial", "relationship_map"],
+    ROLE_MANAGER: ["dashboard", "performance", "oos_analysis", "relationship_map"],
+    ROLE_VIEWER: ["dashboard", "oos_analysis", "relationship_map"],
 }
