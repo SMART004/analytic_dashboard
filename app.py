@@ -6,8 +6,18 @@ from streamlit_option_menu import option_menu
 
 st.set_page_config(
     page_title="Outil d'Analyse Interne",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
+
+# Masquer visuellement le composant de navigation natif (Multi-page MPA)
+st.html("""
+    <style>
+        [data-testid="stSidebarNav"] {
+            display: none;
+        }
+    </style>
+""")
 
 # Correctif Python 3.13 / Windows pour Playwright + asyncio
 if sys.platform == "win32":

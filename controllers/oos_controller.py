@@ -403,7 +403,6 @@ def _build_global_kpis(
 #     if "oos_pct" in df.columns:
 #         df["oos_pct"] = pd.to_numeric(df["oos_pct"], errors="coerce").fillna(0).astype(int)
 
-@st.cache_data(ttl=300, show_spinner=False)
 def _build_listing_context(
     filters: OosHvcFilters,
     hvc_msisdns: set,
