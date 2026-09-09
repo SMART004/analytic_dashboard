@@ -119,7 +119,7 @@ def build_oos_hvc_context(filters: OosHvcFilters) -> OosHvcContext:
     options = _load_filter_options()
     hvc_msisdns = _get_hvc_msisdns()
 
-    listing_ctx = _build_listing_context(filters, hvc_msisdns)
+    listing_ctx = _build_listing_context_uncached(filters, hvc_msisdns)
     variation_ctx = _build_variation_context(filters)
     global_kpis = _build_global_kpis(filters, listing_ctx, variation_ctx, hvc_msisdns)
 
@@ -403,7 +403,7 @@ def _build_global_kpis(
 #     if "oos_pct" in df.columns:
 #         df["oos_pct"] = pd.to_numeric(df["oos_pct"], errors="coerce").fillna(0).astype(int)
 
-def _build_listing_context(
+def _build_listing_context_uncached(
     filters: OosHvcFilters,
     hvc_msisdns: set,
 ) -> OosListingContext:
