@@ -10,3 +10,4 @@ xlsxwriter
 polars
 fastexcel
 bcrypt
+dotenv
