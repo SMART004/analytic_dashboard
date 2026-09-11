@@ -31,11 +31,94 @@ class _LibsqlConnection:
     def __setattr__(self, name, value):
         if name == "_connection":
             object.__setattr__(self, name, value)
+        elif name == "row_factory":
+            object.__setattr__(self, name, value)
         else:
-            setattr(self._connection, name, value)
+            try:
+                setattr(self._connection, name, value)
+            except AttributeError:
+                object.__setattr__(self, name, value)
 
     def __getattr__(self, name):
         return getattr(self._connection, name)
+
+    def cursor(self, *args, **kwargs):
+        return _LibsqlCursor(self._connection.cursor(*args, **kwargs), self)
+
+    def execute(self, *args, **kwargs):
+        return _LibsqlCursor(self._connection.execute(*args, **kwargs), self)
+
+    def executemany(self, *args, **kwargs):
+        return _LibsqlCursor(self._connection.executemany(*args, **kwargs), self)
+
+
+class _LibsqlCursor:
+    """Curseur libSQL avec support des lignes indexables par nom de colonne."""
+
+    def __init__(self, cursor, connection):
+        self._cursor = cursor
+        self._connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def execute(self, *args, **kwargs):
+        self._cursor.execute(*args, **kwargs)
+        return self
+
+    def executemany(self, *args, **kwargs):
+        self._cursor.executemany(*args, **kwargs)
+        return self
+
+    def _row(self, values):
+        if values is None or getattr(self._connection, "row_factory", None) is None:
+            return values
+        columns = [column[0] for column in (self.description or [])]
+        return _NamedRow(columns, values)
+
+    def fetchone(self):
+        return self._row(self._cursor.fetchone())
+
+    def fetchmany(self, size=None):
+        rows = self._cursor.fetchmany(size) if size is not None else self._cursor.fetchmany()
+        return [self._row(row) for row in rows]
+
+    def fetchall(self):
+        return [self._row(row) for row in self._cursor.fetchall()]
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _NamedRow:
+    """Petit équivalent de sqlite3.Row pour les curseurs libSQL."""
+
+    def __new__(cls, columns, values):
+        return super().__new__(cls)
+
+    def __init__(self, columns, values):
+        self._columns = columns
+        self._values = tuple(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            try:
+                key = self._columns.index(key)
+            except ValueError as exc:
+                raise IndexError(key) from exc
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __repr__(self):
+        return repr(self._values)
+
+    def keys(self):
+        return self._columns
 
     def commit(self):
         self._connection.commit()
