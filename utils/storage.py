@@ -1,909 +1,177 @@
-# Storage file
+"""Compatibilité de stockage de fichiers via libSQL/Turso."""
+from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
-import hashlib
-import concurrent.futures
-from io import BytesIO
-from utils.helpers import load_file
-from utils.supabase import supabase
 import datetime
-from utils.config_storage import (
-    USE_LOCAL_STORAGE, DATA_PATH
-)
+import hashlib
+from io import BytesIO
 
-# =====================================================
-# HELPERS
-# =====================================================
+import pandas as pd
+import streamlit as st
 
-def file_hash(file):
-    """
-    Hash MD5 pour ÃƒÂ©viter les doublons exacts
-    """
-    # Lire le contenu brut
-    content = file.read()
-    file.seek(0)  # remettre le pointeur au dÃƒÂ©but pour ne pas bloquer l'upload
+from models.db import get_connection
+from utils.helpers import load_file
+from utils.turso_storage import dataframe_from_bytes, list_objects, load_bytes, save_bytes
+
+
+def file_hash(file) -> str:
+    content = file.getvalue() if hasattr(file, "getvalue") else file.read()
+    if hasattr(file, "seek"):
+        file.seek(0)
     return hashlib.md5(content).hexdigest()
 
 
-def clean_filename(name):
+def clean_filename(name: str) -> str:
     return name.replace(" ", "_").replace("/", "_")
 
 
-# =====================================================
-# CHECK DUPLICATE
-# =====================================================
+def _path(bucket: str, name: str) -> str:
+    return f"{bucket}/{name}"
 
-def file_already_exists(file, bucket=None):
 
-    current_hash = file_hash(file)
+def _objects(bucket: str, prefix: str = "") -> list[dict]:
+    return list_objects(bucket, prefix)
+
+
+def file_already_exists(file, bucket=None) -> bool:
+    if not bucket:
+        return False
+    digest = file_hash(file)
     safe_name = clean_filename(file.name)
+    return any(
+        item["content_hash"] == digest and item["file_name"] == safe_name
+        for item in _objects(bucket)
+    )
 
-    # ==================================
-    # LOCAL
-    # ==================================
-    if USE_LOCAL_STORAGE:
 
-        for f in DATA_PATH.rglob("*"):
+def _save_uploaded(bucket: str, path: str, uploaded_file) -> None:
+    save_bytes(
+        bucket,
+        path,
+        uploaded_file.getvalue(),
+        clean_filename(uploaded_file.name),
+        getattr(uploaded_file, "type", None),
+    )
 
-            if not f.is_file():
-                continue
-
-            if "__" not in f.name:
-                continue
-
-            existing_hash, existing_filename = f.name.split("__", 1)
-
-            if (
-                existing_hash == current_hash
-                and existing_filename == safe_name
-            ):
-                return True
-
-        return False
-
-    # ==================================
-    # SUPABASE
-    # ==================================
-    try:
-
-        existing_files = supabase.storage.from_(bucket).list()
-
-        for f in existing_files:
-
-            existing_name = f.get("name", "")
-
-            if "__" not in existing_name:
-                continue
-
-            existing_hash, existing_filename = existing_name.split("__", 1)
-
-            if (
-                existing_hash == current_hash
-                and existing_filename == safe_name
-            ):
-                return True
-
-        return False
-
-    except Exception as e:
-
-        st.error(str(e))
-        return False
-
-# =====================================================
-# UPLOAD
-# =====================================================
 
 def upload_with_folder(files, bucket):
-    """
-    Upload plusieurs fichiers dans un dossier horodaté.
-    Compatible Local + Supabase.
-    """
-
     if not files:
         st.warning("Aucun fichier sélectionné")
         return None
-
     if not isinstance(files, list):
         files = [files]
-
-    try:
-
-        now = datetime.datetime.now()
-        folder_name = now.strftime("%Y-%m-%d/%H-%M-%S")
-
-        uploaded_files = []
-        skipped_files = []
-
-        for file in files:
-
-            if file_already_exists(file, bucket):
-
-                skipped_files.append(file.name)
-                continue
-
-            # ==========================
-            # LOCAL
-            # ==========================
-            if USE_LOCAL_STORAGE:
-
-                target_folder = (
-                    DATA_PATH
-                    / bucket
-                    / folder_name
-                )
-
-                target_folder.mkdir(
-                    parents=True,
-                    exist_ok=True
-                )
-
-                filepath = target_folder / file.name
-
-                with open(filepath, "wb") as f:
-                    f.write(file.getvalue())
-
-            # ==========================
-            # SUPABASE
-            # ==========================
-            else:
-
-                supabase.storage.from_(bucket).upload(
-                    path=f"{folder_name}/{file.name}",
-                    file=file.getvalue(),
-                    file_options={
-                        "content-type":
-                        file.type or "application/octet-stream",
-                        "upsert": "true"
-                    }
-                )
-
-            uploaded_files.append(file.name)
-
-        if uploaded_files:
-
-            st.success(
-                f"{len(uploaded_files)} fichier(s) uploadé(s)"
-            )
-
-        if skipped_files:
-
-            st.warning(
-                f"{len(skipped_files)} fichier(s) ignoré(s)"
-            )
-
-        return folder_name
-
-    except Exception as e:
-
-        st.error(
-            f"Erreur upload : {str(e)}"
-        )
-
-        return None
+    folder = datetime.datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
+    uploaded = 0
+    for file in files:
+        if not file_already_exists(file, bucket):
+            _save_uploaded(bucket, f"{folder}/{clean_filename(file.name)}", file)
+            uploaded += 1
+    if uploaded:
+        st.success(f"{uploaded} fichier(s) uploadé(s)")
+    return folder
 
 
 def upload_file(uploaded_file, bucket):
-
-    if uploaded_file is None:
+    if uploaded_file is None or file_already_exists(uploaded_file, bucket):
         return False
+    _save_uploaded(bucket, f"{file_hash(uploaded_file)}__{clean_filename(uploaded_file.name)}", uploaded_file)
+    return True
 
-    if file_already_exists(uploaded_file, bucket):
-        st.warning(f"{uploaded_file.name} existe déjà")
-        return False
 
-    file_md5 = file_hash(uploaded_file)
-    safe_name = clean_filename(uploaded_file.name)
+def _as_dataframe(bucket: str, path: str):
+    content = load_bytes(bucket, path)
+    if content is None:
+        return None
+    return dataframe_from_bytes(content, path)
 
-    final_name = f"{file_md5}__{safe_name}"
-
-    # ==================================
-    # LOCAL
-    # ==================================
-    if USE_LOCAL_STORAGE:
-
-        folder = DATA_PATH / bucket
-        folder.mkdir(parents=True, exist_ok=True)
-
-        filepath = folder / final_name
-
-        with open(filepath, "wb") as f:
-            f.write(uploaded_file.getvalue())
-
-        return True
-
-    # ==================================
-    # SUPABASE
-    # ==================================
-    try:
-
-        supabase.storage.from_(bucket).upload(
-            final_name,
-            uploaded_file.getvalue(),
-            {
-                "content-type": uploaded_file.type
-            }
-        )
-
-        return True
-
-    except Exception as e:
-
-        st.error(str(e))
-        return False
 
 @st.cache_data(show_spinner=False)
 def get_with_folder(bucket, file_path):
+    return _as_dataframe(bucket, file_path)
 
-    try:
 
-        # ==================================
-        # LOCAL
-        # ==================================
-        if USE_LOCAL_STORAGE:
-
-            local_file = DATA_PATH / bucket / file_path
-
-            if not local_file.exists():
-
-                st.error(
-                    f"Fichier introuvable : {local_file}"
-                )
-
-                return None
-
-            if local_file.suffix.lower() == ".csv":
-
-                return pd.read_csv(local_file)
-
-            return pd.read_excel(local_file)
-
-        # ==================================
-        # SUPABASE
-        # ==================================
-        file_bytes = (
-            supabase.storage
-            .from_(bucket)
-            .download(file_path)
-        )
-
-        if file_path.lower().endswith(".csv"):
-
-            return pd.read_csv(
-                BytesIO(file_bytes)
-            )
-
-        return pd.read_excel(
-            BytesIO(file_bytes)
-        )
-
-    except Exception as e:
-
-        st.error(
-            f"Erreur lecture fichier : {str(e)}"
-        )
-
-        return None
-
-# =====================================================
-# LOAD ALL FILES FROM BUCKET
-# =====================================================
 @st.cache_data(show_spinner=False, ttl=300)
 def get_all_files(bucket: str) -> pd.DataFrame:
-    """Charge tous les fichiers du bucket (local ou Supabase)."""
-    all_dfs = []
+    frames = []
+    for item in _objects(bucket):
+        try:
+            frame = _as_dataframe(bucket, item["name"])
+            if frame is not None and not frame.empty:
+                frame["source_file"] = item["file_name"]
+                frame["source_path"] = item["name"]
+                frames.append(frame)
+        except Exception as exc:
+            st.warning(f"Erreur lecture {item['name']}: {exc}")
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    try:
-        # ==================================
-        # MODE LOCAL
-        # ==================================
-        if USE_LOCAL_STORAGE:
-            bucket_folder = DATA_PATH / bucket
-
-            if not bucket_folder.exists():
-                st.warning(f"Dossier local non trouvé : {bucket_folder}")
-                return pd.DataFrame()
-
-            files = list(bucket_folder.rglob("*"))
-
-            for file_path in files:
-                if not file_path.is_file():
-                    continue
-
-                try:
-                    # On crée un objet BytesIO avec .name pour compatibilité
-                    with open(file_path, "rb") as f:
-                        file_bytes = f.read()
-
-                    file_buffer = BytesIO(file_bytes)
-                    file_buffer.name = file_path.name   # ← Important !
-
-                    temp_df = load_file(file_buffer)
-
-                    if temp_df is None or temp_df.empty:
-                        continue
-
-                    temp_df["source_file"] = file_path.name
-                    temp_df["source_path"] = str(file_path)
-                    all_dfs.append(temp_df)
-
-                except Exception as e:
-                    st.warning(f"Erreur lecture {file_path.name}: {e}")
-
-        # ==================================
-        # MODE SUPABASE
-        # ==================================
-        else:
-            try:
-                files = supabase.storage.from_(bucket).list()
-            except Exception as e:
-                st.error(f"Erreur listing Supabase : {e}")
-                return pd.DataFrame()
-
-            for f in files:
-                file_name = f["name"]
-                try:
-                    downloaded = supabase.storage.from_(bucket).download(file_name)
-                    file_buffer = BytesIO(downloaded)
-                    file_buffer.name = file_name
-
-                    temp_df = load_file(file_buffer)
-
-                    if temp_df is None or temp_df.empty:
-                        continue
-
-                    temp_df["source_file"] = file_name
-                    all_dfs.append(temp_df)
-
-                except Exception as e:
-                    st.warning(f"Erreur download {file_name}: {e}")
-
-        # ==================================
-        # FUSION FINALE
-        # ==================================
-        if not all_dfs:
-            return pd.DataFrame()
-
-        final_df = pd.concat(all_dfs, ignore_index=True)
-
-        # Nettoyage colonnes
-        final_df.columns = [str(c).strip() for c in final_df.columns]
-
-        return final_df
-
-    except Exception as e:
-        st.error(f"Erreur générale get_all_files : {e}")
-        return pd.DataFrame()
-    
 
 @st.cache_data(show_spinner=False)
 def get_one_folder(bucket):
-
-    try:
-
-        all_dfs = []
-
-        # ==================================
-        # LOCAL
-        # ==================================
-        if USE_LOCAL_STORAGE:
-
-            root = DATA_PATH / bucket
-
-            if not root.exists():
-                return pd.DataFrame()
-
-            folders = [
-                f.name
-                for f in root.iterdir()
-                if f.is_dir()
-            ]
-
-            if not folders:
-                return pd.DataFrame()
-
-            most_recent_folder = sorted(
-                folders,
-                reverse=True
-            )[0]
-
-            folder_path = (
-                root
-                / most_recent_folder
-            )
-
-            files = [
-                f
-                for f in folder_path.iterdir()
-                if f.is_file()
-            ]
-
-            for file_path in files:
-
-                try:
-
-                    temp_df = load_file(
-                        str(file_path)
-                    )
-
-                    if temp_df is None:
-                        continue
-
-                    temp_df["source_file"] = (
-                        file_path.name
-                    )
-
-                    all_dfs.append(temp_df)
-
-                except Exception as e:
-
-                    st.warning(
-                        f"Erreur {file_path.name}: {e}"
-                    )
-
-        # ==================================
-        # SUPABASE
-        # ==================================
-        else:
-
-            storage = supabase.storage.from_(bucket)
-
-            folders = storage.list()
-
-            valid_folders = [
-                f["name"]
-                for f in folders
-            ]
-
-            most_recent_folder = sorted(
-                valid_folders,
-                reverse=True
-            )[0]
-
-            folder_files = storage.list(
-                path=most_recent_folder
-            )
-
-            for item in folder_files:
-
-                file_path = (
-                    f"{most_recent_folder}/"
-                    f"{item['name']}"
-                )
-
-                downloaded = storage.download(
-                    file_path
-                )
-
-                file_buffer = BytesIO(
-                    downloaded
-                )
-
-                file_buffer.name = item["name"]
-
-                temp_df = load_file(
-                    file_buffer
-                )
-
-                if temp_df is None:
-                    continue
-
-                temp_df["source_file"] = (
-                    item["name"]
-                )
-
-                all_dfs.append(temp_df)
-
-        if not all_dfs:
-            return pd.DataFrame()
-
-        final_df = pd.concat(
-            all_dfs,
-            ignore_index=True
-        )
-
-        final_df.columns = [
-            c.strip()
-            for c in final_df.columns
-        ]
-
-        return final_df
-
-    except Exception as e:
-
-        st.error(
-            f"Erreur : {str(e)}"
-        )
-
+    folders = list_month_folders(bucket)
+    if not folders:
         return pd.DataFrame()
-    
+    frame = get_files_by_month(bucket, folders[-1])
+    return frame if frame is not None else pd.DataFrame()
 
-################################## PERFORMANCE CC ###########
+
 def extract_months_from_file(uploaded_file):
-    """
-    Retourne une liste d'objets datetime des mois prÃƒÂ©sents dans le fichier.
-    Ãƒâ‚¬ adapter selon la structure de tes fichiers.
-    """
     try:
-        # Charger le fichier temporairement pour analyser les dates
-        df = load_file(uploaded_file)  # ou pd.read_excel / pd.read_csv selon le cas
-
-        if df is None or 'Date' not in df.columns:
-            # Fallback : utiliser la date du jour
+        frame = load_file(uploaded_file)
+        if frame is None or "Date" not in frame.columns:
             return [datetime.date.today()]
-
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df = df.dropna(subset=['Date'])
-
-        # Extraire les mois uniques
-        unique_months = df['Date'].dt.to_period('M').unique()
-        return [m.to_timestamp().date() for m in unique_months]
-
-    except:
-        # En cas d'erreur, on met le mois actuel
+        dates = pd.to_datetime(frame["Date"], errors="coerce").dropna()
+        return [month.to_timestamp().date() for month in dates.dt.to_period("M").unique()]
+    except Exception:
         return [datetime.date.today()]
 
 
 def upload_file_by_month(uploaded_file, bucket):
-
-    if uploaded_file is None:
+    if uploaded_file is None or file_already_exists(uploaded_file, bucket):
         return False
+    months = extract_months_from_file(uploaded_file)
+    year = months[0].year
+    folder = f"{year}-" + "-".join(f"{month.month:02d}" for month in sorted(months))
+    _save_uploaded(bucket, f"{folder}/{file_hash(uploaded_file)}__{clean_filename(uploaded_file.name)}", uploaded_file)
+    return True
 
-    try:
 
-        months = extract_months_from_file(
-            uploaded_file
-        )
-
-        if not months:
-
-            st.warning(
-                f"Mois introuvable : "
-                f"{uploaded_file.name}"
-            )
-
-            return False
-
-        year = months[0].year
-
-        month_numbers = sorted(
-            [m.month for m in months]
-        )
-
-        if len(month_numbers) == 1:
-
-            folder_name = (
-                f"{year}-"
-                f"{month_numbers[0]:02d}"
-            )
-
-        else:
-
-            folder_name = (
-                f"{year}-"
-                + "-".join(
-                    f"{m:02d}"
-                    for m in month_numbers
-                )
-            )
-
-        if file_already_exists(
-            uploaded_file,
-            bucket
-        ):
-            st.warning(
-                f"{uploaded_file.name} existe déjà"
-            )
-            return False
-
-        file_md5 = file_hash(
-            uploaded_file
-        )
-
-        safe_name = clean_filename(
-            uploaded_file.name
-        )
-
-        final_name = (
-            f"{file_md5}__{safe_name}"
-        )
-
-        # ==========================
-        # LOCAL
-        # ==========================
-        if USE_LOCAL_STORAGE:
-
-            month_folder = (
-                DATA_PATH
-                / bucket
-                / folder_name
-            )
-
-            month_folder.mkdir(
-                parents=True,
-                exist_ok=True
-            )
-
-            filepath = (
-                month_folder
-                / final_name
-            )
-
-            with open(filepath, "wb") as f:
-
-                f.write(
-                    uploaded_file.getvalue()
-                )
-
-        # ==========================
-        # SUPABASE
-        # ==========================
-        else:
-
-            final_path = (
-                f"{folder_name}/"
-                f"{final_name}"
-            )
-
-            supabase.storage.from_(bucket).upload(
-                final_path,
-                uploaded_file.getvalue(),
-                {
-                    "content-type":
-                    uploaded_file.type
-                    or "application/octet-stream"
-                }
-            )
-
-        return True
-
-    except Exception as e:
-
-        st.error(
-            f"Erreur upload : {str(e)}"
-        )
-
-        return False
-    
 @st.cache_data(ttl=120)
 def list_month_folders(bucket=None):
+    if not bucket:
+        return []
+    folders = {item["name"].split("/", 1)[0] for item in _objects(bucket) if "/" in item["name"]}
+    return sorted(folders)
 
-    if USE_LOCAL_STORAGE:
 
-        bucket_folder = DATA_PATH / bucket
-
-        if not bucket_folder.exists():
-            return []
-
-        folders = sorted([
-            f.name
-            for f in bucket_folder.iterdir()
-            if f.is_dir()
-        ])
-
-        return folders
-
-    else:
-
-        files = supabase.storage.from_(bucket).list()
-
-        def is_likely_folder(name):
-
-            if name.startswith("."):
-                return False
-
-            return "." not in name.split("/")[-1]
-
-        return sorted([
-            item["name"]
-            for item in files
-            if is_likely_folder(item["name"])
-        ])
-    
 def get_month_files(bucket, selected_month):
+    prefix = f"{selected_month}/"
+    return [
+        {"name": item["name"].split("/", 1)[1], "path": item["name"]}
+        for item in _objects(bucket, prefix)
+        if "/" in item["name"]
+    ]
 
-    if USE_LOCAL_STORAGE:
-
-        folder = DATA_PATH / bucket / selected_month
-
-        if not folder.exists():
-            return []
-
-        return [
-            {
-                "name": file.name,
-                "path": file
-            }
-            for file in folder.iterdir()
-            if file.is_file()
-        ]
-
-    else:
-
-        all_files = []
-
-        offset = 0
-        limit = 1000
-
-        while True:
-
-            files = supabase.storage.from_(bucket).list(
-                path=selected_month,
-                options={
-                    "limit": limit,
-                    "offset": offset
-                }
-            )
-
-            if not files:
-                break
-
-            all_files.extend(files)
-
-            offset += limit
-
-            if len(files) < limit:
-                break
-
-        return all_files
 
 def download_month_file(bucket, selected_month, file_info):
+    return _as_dataframe(bucket, file_info.get("path") or f"{selected_month}/{file_info['name']}")
 
-    if USE_LOCAL_STORAGE:
-
-        file_path = file_info["path"]
-
-        if file_path.suffix.lower() == ".csv":
-            return pd.read_csv(file_path)
-
-        return pd.read_excel(file_path)
-
-    else:
-
-        name = file_info["name"]
-
-        full_path = f"{selected_month}/{name}"
-
-        res = supabase.storage.from_(bucket).download(full_path)
-
-        if full_path.lower().endswith(".csv"):
-            return pd.read_csv(BytesIO(res))
-
-        return pd.read_excel(BytesIO(res))
 
 @st.cache_data(ttl=60)
 def get_files_by_month(bucket, selected_month, max_workers=1):
-    try:
-
-        all_files = get_month_files(
-            bucket,
-            selected_month
-        )
-
-        if not all_files:
-
-            st.warning(
-                f"Aucun fichier dans {selected_month}"
-            )
-            return None
-
-        st.info(f"📁 {len(all_files)} fichiers trouvés dans {selected_month}. Chargement en parallèle...")
-
-        dfs = []
-        errors = []
-
-        def download_file(file_info):
-            try:
-
-                df = download_month_file(
-                    bucket,
-                    selected_month,
-                    file_info
-                )
-
-                if df is None or df.empty:
-                    return None
-
-                df["source_file"] = file_info["name"]
-
-                return df
-
-            except Exception as e:
-
-                return (
-                    "ERROR",
-                    file_info["name"],
-                    str(e)
-                )
-            
-        # Parallélisme avec ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(download_file, all_files))
-
-        for result in results:
-            if result is None:
-                continue
-            if isinstance(result, tuple) and result[0] == "ERROR":
-                errors.append({
-                    "file": result[1],
-                    "error": result[2]
-                })
-            else:
-                dfs.append(result)
-
-        if dfs:
-            final_df = pd.concat(dfs, ignore_index=True)
-            final_df.columns = [c.strip() for c in final_df.columns]
-            st.success(f"✅ {len(dfs)} fichiers chargés avec succès ({len(errors)} erreurs)")
-            if errors:
-                st.error(f"{len(errors)} fichiers en erreur")
-                st.dataframe(
-                    pd.DataFrame(errors),
-                    use_container_width=True
-                )
-            return final_df
-        else:
-            st.error("Aucun fichier valide chargé")
-            return None
-
-    except Exception as e:
-        st.error(f"Erreur générale : {e}")
-        return None
+    frames = []
+    for item in get_month_files(bucket, selected_month):
+        frame = download_month_file(bucket, selected_month, item)
+        if frame is not None and not frame.empty:
+            frame["source_file"] = item["name"]
+            frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else None
 
 
-# =====================================================
-# LIST FILES (Fonction d'alias / compatibilité)
-# =====================================================
 def list_files(bucket):
-    """
-    Retourne la liste des fichiers ou répertoires contenus dans un bucket.
-    """
-    if USE_LOCAL_STORAGE:
-        bucket_folder = DATA_PATH / bucket
-        if not bucket_folder.exists():
-            return []
-        return [
-            f.name for f in bucket_folder.rglob("*") if f.is_file()
-        ]
-    else:
-        try:
-            files = supabase.storage.from_(bucket).list()
-            return [f["name"] for f in files]
-        except Exception as e:
-            st.error(f"Erreur lors de la récupération des fichiers : {e}")
-            return []
+    return [item["name"] for item in _objects(bucket)]
 
 
-# =====================================================
-# GET FILE BYTES
-# =====================================================
-def get_file_bytes(bucket: str, file_path: str) -> bytes:
-    """
-    Récupère le contenu brut (bytes) d'un fichier depuis Local ou Supabase.
-    """
-    try:
-        # ==================================
-        # LOCAL
-        # ==================================
-        if USE_LOCAL_STORAGE:
-            local_file = DATA_PATH / bucket / file_path
-            if not local_file.exists():
-                st.error(f"Fichier local introuvable : {local_file}")
-                return None
-            with open(local_file, "rb") as f:
-                return f.read()
+def get_file_bytes(bucket: str, file_path: str) -> bytes | None:
+    return load_bytes(bucket, file_path)
 
-        # ==================================
-        # SUPABASE
-        # ==================================
-        else:
-            file_bytes = supabase.storage.from_(bucket).download(file_path)
-            return file_bytes
 
-    except Exception as e:
-        st.error(f"Erreur lors de la récupération des bytes du fichier '{file_path}': {e}")
-        return None
-
-# Alias si la fonction est appelée au pluriel (get_files_bytes) dans certaines pages
 get_files_bytes = get_file_bytes

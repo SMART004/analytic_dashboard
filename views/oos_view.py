@@ -70,6 +70,7 @@ from utils.helpers_hvc_oos_variation import (
     load_dsm_mapping_from_settings,
 )
 from scripts.clear_listing_oos import clear_listing_oos
+from models.oos_model import get_oos_snapshot_options, delete_oos_snapshot
 
 # Seuils visuels — coherents avec variations_hvc.py original
 _OOS_SEUIL_VERT = 20.0      # % OOS < 20 -> ok
@@ -344,14 +345,14 @@ def _render_tx_to_oos_tab() -> None:
 
 def render_reset_oos_button():
     st.warning("⚠️ Zone de danger")
-    
+
     # Bouton avec confirmation pour éviter les fausses manipulations
     if st.button("🗑️ Vider tout l'historique OOS", key="btn_clear_oos"):
         st.session_state["confirm_clear_oos"] = True
 
     if st.session_state.get("confirm_clear_oos", False):
         st.error("Êtes-vous sûr de vouloir supprimer TOUTES les données de la table listing_oos ? Cette action est irréversible.")
-        
+
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✅ Oui, tout vider", key="btn_confirm_yes"):
@@ -363,10 +364,50 @@ def render_reset_oos_button():
                 st.success(f"La table a été vidée ({count} enregistrements supprimés).")
                 st.session_state["confirm_clear_oos"] = False
                 st.rerun()
-                
+
         with col2:
             if st.button("❌ Annuler", key="btn_confirm_no"):
                 st.session_state["confirm_clear_oos"] = False
+                st.rerun()
+
+    st.markdown("### Supprimer un snapshot précis")
+    snapshots = get_oos_snapshot_options()
+    if not snapshots:
+        st.info("Aucun snapshot OOS disponible.")
+        return
+
+    snapshot_values = [item["snapshot_date"] for item in snapshots]
+    selected_snapshot = st.selectbox(
+        "Heure d'injection à supprimer",
+        snapshot_values,
+        format_func=lambda value: next(
+            f"{value} ({item['row_count']} lignes)"
+            for item in snapshots
+            if item["snapshot_date"] == value
+        ),
+        key="oos_snapshot_to_delete",
+    )
+
+    if st.button("🗑️ Préparer la suppression de ce snapshot", key="btn_delete_oos_snapshot"):
+        st.session_state["confirm_delete_oos_snapshot"] = selected_snapshot
+
+    pending_snapshot = st.session_state.get("confirm_delete_oos_snapshot")
+    if pending_snapshot:
+        st.warning(
+            f"Suppression irréversible du snapshot **{pending_snapshot}**. "
+            "Toutes ses lignes seront supprimées, les autres snapshots resteront inchangés."
+        )
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("✅ Confirmer la suppression", key="confirm_delete_snapshot"):
+                deleted = delete_oos_snapshot(pending_snapshot)
+                st.cache_data.clear()
+                st.session_state["confirm_delete_oos_snapshot"] = None
+                st.success(f"Snapshot supprimé : {deleted} lignes.")
+                st.rerun()
+        with cancel_col:
+            if st.button("❌ Annuler la suppression", key="cancel_delete_snapshot"):
+                st.session_state["confirm_delete_oos_snapshot"] = None
                 st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -779,7 +820,7 @@ def _render_deduced_commercials_section(display: pd.DataFrame) -> None:
     deduced_df = pd.DataFrame()
     deduced_df["Numero du POS"] = enriched_df.get("Numero du POS", enriched_df.get("msisdn", ""))
     deduced_df["Nom du POS"] = enriched_df.get("Nom du POS", enriched_df.get("full_name", ""))
-    
+
     # --- Nouvelles Colonnes Ajoutées ---
     deduced_df["MSISDN Intervenant"] = enriched_df["MSISDN Intervenant"].fillna("-")
     deduced_df["Nom du commercial / Intervenant"] = (
@@ -1651,4 +1692,4 @@ def _render_upload_section() -> None:
                 st.error(f"Erreurs : {'; '.join(str(e) for e in errors)}")
             if inserted:
                 st.success(f"✅ Ingestion automatique réussie : {inserted} lignes insérées sur {len(new_files)} fichier(s).")
-                st.rerun()
+                st.rerun()

@@ -1,6 +1,6 @@
 # ingestion/upload_sync.py
 """
-Pont entre les 3 buckets Supabase Storage de performance (Commercial,
+Pont entre les 3 espaces de stockage de performance (Commercial,
 PR & Caisses, CDS — Q3 : 3 buckets distincts conservés) et la table SQLite
 ``transactions``.
 
@@ -231,7 +231,7 @@ def sync_hvc_variation_to_sqlite(uploaded_file: Any) -> dict:
 
         # Horodatage : extrait du nom de fichier si format ISO reconnu,
         # sinon datetime.now() — meme logique que variations_hvc.py original
-        # qui utilisait l'horodatage du fichier Supabase Storage.
+        # qui utilisait l'horodatage du fichier stocké.
         import re
         ts_match = re.search(r"(\d{4}-\d{2}-\d{2}[T_]\d{2}[:-]\d{2})", uploaded_file.name)
         if ts_match:

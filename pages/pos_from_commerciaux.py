@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.helpers import clean_phone, load_file
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 from domain.reference import normalize_commercial_reference
 
 

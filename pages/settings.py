@@ -1,8 +1,8 @@
 # Settings page - Configurations
 import streamlit as st
-from utils.supabase import handle_upload
+from utils.turso_storage import handle_upload
 from ingestion.ingest import run_referentiel_ingestion, update_pos_targets_from_file
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 
 
 def _handle_reference_upload(**kwargs):

@@ -19,7 +19,7 @@ import polars as pl
 from models.db import get_connection, execute_schema_file
 from utils.config_storage import DATA_PATH
 from utils.helpers import clean_phone
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 
 logger = logging.getLogger(__name__)
 
@@ -568,7 +568,7 @@ def _ingest_transaction_dataframe(
     """
     Cœur d'insertion partagé par ingest_transaction_file (fichiers locaux) et
     ingest_transaction_dataframe (DataFrames déjà chargés depuis un bucket
-    Supabase, cf. ingestion/upload_sync.py). Gèle le snapshot zone/territoire
+    le stockage de fichiers, cf. ingestion/upload_sync.py). Gèle le snapshot zone/territoire
     au moment de l'ingestion, comme avant.
     """
     if df is None or df.empty:
@@ -694,7 +694,7 @@ def ingest_transaction_dataframe(
 ) -> int:
     """
     Ingère un DataFrame de transactions déjà chargé en mémoire (cas des 3
-    buckets Supabase de performance — bloquant 3, Tâche 5). Le fichier
+    buckets de performance — bloquant 3, Tâche 5). Le fichier
     source n'existe jamais sur disque local ici : le hash est calculé sur le
     contenu du DataFrame plutôt que sur des octets de fichier, à titre
     purement informatif (traçabilité de source_file/file_hash) — la
@@ -906,7 +906,7 @@ def run_referentiel_ingestion(conn: sqlite3.Connection | None = None) -> dict[st
     Pensée pour être appelée à chaque upload réussi dans pages/settings.py :
     idempotente (ON CONFLICT DO UPDATE / INSERT OR IGNORE partout), donc sans
     risque de duplication si rappelée plusieurs fois. C'est le chaînon qui
-    manquait entre "fichier settings uploadé vers Supabase Storage" et "table
+    manquait entre "fichier settings uploadé vers le stockage distant" et "table
     SQLite à jour" — avant ce correctif, aucune page ne relisait plus les
     settings en direct, mais rien ne les poussait non plus vers SQLite après
     upload.

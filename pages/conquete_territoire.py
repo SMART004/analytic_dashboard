@@ -9,7 +9,7 @@ from io import BytesIO
 from controllers.exclusion import get_excluded_msisdns
 from utils.storage import upload_file, get_all_files
 from utils.helpers import clean_phone
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 
 # ─────────────────────────────────────────────
 # CONSTANTES

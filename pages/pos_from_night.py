@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from utils.helpers import clean_phone, to_excel
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 from domain.reference import get_global_excluded_numbers
 
 BUCKET_NAME = "pos-night-result-files"

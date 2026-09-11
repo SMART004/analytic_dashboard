@@ -226,6 +226,50 @@ def get_oos_listing(
     return pd.read_sql_query(query, conn, params=params)
 
 
+def get_oos_snapshot_options(conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+    """Retourne les snapshots OOS disponibles, du plus récent au plus ancien."""
+    should_close = conn is None
+    if conn is None:
+        conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT snapshot_date, COUNT(*) AS row_count
+            FROM listing_oos
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date DESC
+            """
+        ).fetchall()
+        return [
+            {"snapshot_date": row[0], "row_count": row[1]}
+            for row in rows
+        ]
+    finally:
+        if should_close:
+            conn.close()
+
+
+def delete_oos_snapshot(snapshot_date: str, conn: Optional[sqlite3.Connection] = None) -> int:
+    """Supprime exactement un snapshot OOS horodaté."""
+    if not snapshot_date or len(snapshot_date) > 32:
+        raise ValueError("Horodatage de snapshot invalide.")
+
+    should_close = conn is None
+    if conn is None:
+        conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM listing_oos WHERE snapshot_date = ?",
+            (snapshot_date,),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        return deleted
+    finally:
+        if should_close:
+            conn.close()
+
+
 def find_frequent_commercial_for_unassigned_pos(
     unassigned_msisdns: List[str], 
     conn: Optional[sqlite3.Connection] = None

@@ -138,7 +138,7 @@ def _render_upload_sync_section(segment: Segment) -> None:
             )
             if st.button("Uploader vers Storage", key=f"{prefix}_btn_upload"):
                 if uploaded_files:
-                    with st.spinner("Téléversement vers Supabase Storage..."):
+                    with st.spinner("Téléversement vers Turso..."):
                         nb_uploaded = upload_segment_files(segment, uploaded_files)
                         st.success(f"✅ {nb_uploaded} fichier(s) téléversé(s) avec succès.")
                         st.cache_data.clear()

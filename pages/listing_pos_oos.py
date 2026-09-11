@@ -32,7 +32,7 @@ import streamlit as st
 
 import matplotlib
 
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle

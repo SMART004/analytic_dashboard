@@ -3,6 +3,7 @@ import bcrypt
 import streamlit as st
 from typing import Optional, Dict, Any
 from models.user_model import get_user_by_username
+from models.user_model import create_auth_session, delete_auth_session, get_user_by_session_token
 from app_config.settings import PERMISSIONS, ROLE_VIEWER
 
 def hash_password(password: str) -> str:
@@ -22,6 +23,7 @@ def login(username: str, password: str) -> bool:
             "username": user["username"],
             "role": user["role"]
         }
+        st.query_params["auth"] = create_auth_session(user["username"])
         return True
     return False
 
@@ -29,7 +31,24 @@ def logout() -> None:
     """Déconnecte l'utilisateur."""
     st.session_state["authenticated"] = False
     st.session_state["user"] = None
+    delete_auth_session(st.query_params.get("auth", ""))
+    st.query_params.pop("auth", None)
     st.rerun()
+
+
+def restore_session() -> bool:
+    """Restaure l'authentification après un redémarrage du processus Streamlit."""
+    if st.session_state.get("authenticated", False):
+        return True
+    user = get_user_by_session_token(st.query_params.get("auth", ""))
+    if not user:
+        return False
+    st.session_state["authenticated"] = True
+    st.session_state["user"] = {
+        "username": user["username"],
+        "role": user["role"],
+    }
+    return True
 
 def get_current_user() -> Optional[Dict[str, Any]]:
     """Retourne l'utilisateur courant stocké en session."""

@@ -24,7 +24,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # Auth & RBAC
-from controllers.auth_controller import get_current_user, has_permission
+from controllers.auth_controller import get_current_user, has_permission, restore_session
 from models.user_model import init_user_table
 from views.auth_view import render_login_page, render_user_bar
 
@@ -37,6 +37,7 @@ from pages.pos_analytic import show_gros_transferts
 from pages.pos_from_commerciaux import show_pos_from_commerciaux
 from pages.pos_non_touches import show_pos_non_touches
 from pages.settings import show_settings
+from pages.user_management import show_user_management
 from pages.variations_hvc import render_oos_variation
 from pages.oos import show_oos_hvc
 from pages.relationship_map import show_relationship_map
@@ -45,7 +46,7 @@ from pages.relationship_map import show_relationship_map
 init_user_table()
 
 # ── 2. Écran de connexion (si non authentifié) ─────────────────────────────────
-if not st.session_state.get("authenticated", False):
+if not restore_session():
     render_login_page()
     st.stop()
 
@@ -117,6 +118,12 @@ ALL_NAVIGATION_ITEMS = [
         "icon": "gear-fill",
         "permission": "settings",
         "handler": show_settings,
+    },
+    {
+        "label": "Gestion utilisateurs",
+        "icon": "person-gear",
+        "permission": "user_management",
+        "handler": show_user_management,
     },
 ]
 

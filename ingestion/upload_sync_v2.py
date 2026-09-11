@@ -1,6 +1,6 @@
 """ingestion/upload_sync.py
 
-Pont entre les 3 buckets Supabase des pages de performance et la table
+Pont entre les 3 espaces de stockage des pages de performance et la table
 SQLite `transactions`. Corrige le Bloquant 3 identifie en revue de la
 Tache 5.4 : sans ce module, les fichiers uploades depuis
 views/performance_view.py n'etaient jamais lus dans SQLite — seul

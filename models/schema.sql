@@ -1,6 +1,20 @@
 -- models/schema.sql
 -- Schéma SQLite v1.1 — Dashboard Analytics Mobile Money
 
+-- 0. Fichiers de configuration et de transactions stockés dans libSQL/Turso
+CREATE TABLE IF NOT EXISTS stored_files (
+    bucket TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    content BLOB NOT NULL,
+    content_type TEXT,
+    content_hash TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (bucket, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stored_files_bucket ON stored_files(bucket);
+
 -- 1. RÉFÉRENTIEL DES SITES (table canonique)
 CREATE TABLE IF NOT EXISTS sites (
     site_key TEXT PRIMARY KEY,          -- Nom de site normalisé (upper/trim), clé canonique

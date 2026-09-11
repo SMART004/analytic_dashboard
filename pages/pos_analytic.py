@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 from utils.helpers import load_file, clean_phone, find_amount_column, to_excel
 from utils.plotting import create_gros_transferts_charts
-from utils.supabase import load_setting
+from utils.turso_storage import load_setting
 from domain.reference import get_global_excluded_numbers
 
 

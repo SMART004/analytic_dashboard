@@ -1,8 +1,17 @@
 # models/db.py
 import sqlite3
+import os
+import logging
 from pathlib import Path
 from typing import Optional
-from utils.config_storage import LOCAL_STORAGE_PATH
+from utils.config_storage import LOCAL_STORAGE_PATH, USE_LOCAL_STORAGE
+
+logger = logging.getLogger(__name__)
+
+try:
+    import libsql  # type: ignore[import-not-found]
+except ImportError:
+    libsql = None
 
 try:
     import streamlit as st
@@ -11,6 +20,57 @@ except ImportError:
     _HAS_STREAMLIT = False
 
 DEFAULT_DB_PATH = LOCAL_STORAGE_PATH / "dashboard.db"
+
+
+class _LibsqlConnection:
+    """Adapteur DB-API qui synchronise chaque transaction vers libSQL."""
+
+    def __init__(self, connection):
+        object.__setattr__(self, "_connection", connection)
+
+    def __setattr__(self, name, value):
+        if name == "_connection":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._connection, name, value)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def commit(self):
+        self._connection.commit()
+        self._connection.sync()
+
+    def __enter__(self):
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            self.commit()
+        else:
+            self._connection.rollback()
+        self.close()
+        return False
+
+    def close(self):
+        try:
+            self._connection.commit()
+            self._connection.sync()
+        finally:
+            self._connection.close()
+
+
+def _libsql_settings() -> tuple[str | None, str | None]:
+    if USE_LOCAL_STORAGE:
+        return None, None
+    url = os.getenv("LIBSQL_URL") or os.getenv("TURSO_DATABASE_URL")
+    token = os.getenv("LIBSQL_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN")
+    if not url or not token:
+        raise RuntimeError(
+            "USE_LOCAL_STORAGE=false exige TURSO_DATABASE_URL et TURSO_AUTH_TOKEN."
+        )
+    return url, token
 
 # Chemins de base déjà synchronisés avec le schéma courant dans ce process.
 # Toutes les instructions de models/schema.sql sont en CREATE TABLE/INDEX
@@ -41,13 +101,29 @@ def get_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
     if db_path is None:
         db_path = get_db_path()
 
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    libsql_url, libsql_token = _libsql_settings()
+    if libsql_url:
+        if libsql is None:
+            raise RuntimeError(
+                "LIBSQL_URL est configuré mais libsql n'est pas installé. "
+                "Installez les dépendances de requirements.txt."
+            )
+        conn = _LibsqlConnection(
+            libsql.connect(
+                str(db_path),
+                sync_url=libsql_url,
+                auth_token=libsql_token,
+            )
+        )
+        conn.sync()
+    else:
+        conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=OFF;")  # Géré manuellement selon l'ordre d'ingestion
     conn.execute("PRAGMA busy_timeout=10000;")
 
-    resolved_path = str(db_path)
+    resolved_path = f"{db_path}|{libsql_url or 'sqlite'}"
     if resolved_path not in _schema_synced_paths:
         execute_schema_file(conn)
         _schema_synced_paths.add(resolved_path)
@@ -73,11 +149,26 @@ def _make_read_connection(db_path: Optional[str | Path] = None) -> sqlite3.Conne
     N'applique PAS le schéma — uniquement pour les vues."""
     if db_path is None:
         db_path = get_db_path()
-    conn = sqlite3.connect(
-        str(db_path),
-        timeout=30.0,
-        check_same_thread=False,  # nécessaire pour @st.cache_resource
-    )
+    libsql_url, libsql_token = _libsql_settings()
+    if libsql_url:
+        if libsql is None:
+            raise RuntimeError(
+                "LIBSQL_URL est configuré mais libsql n'est pas installé."
+            )
+        conn = _LibsqlConnection(
+            libsql.connect(
+                str(db_path),
+                sync_url=libsql_url,
+                auth_token=libsql_token,
+            )
+        )
+        conn.sync()
+    else:
+        conn = sqlite3.connect(
+            str(db_path),
+            timeout=30.0,
+            check_same_thread=False,  # nécessaire pour @st.cache_resource
+        )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=10000;")

@@ -326,7 +326,7 @@ def get_conquete_evolution_series(
 
 def _load_master_caisse_msisdns() -> tuple[set[str], set[str]]:
     from utils.helpers import clean_phone
-    from utils.supabase import load_setting
+    from utils.turso_storage import load_setting
 
     masters, caisses = set(), set()
 

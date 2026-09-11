@@ -48,7 +48,7 @@ from openpyxl.utils import get_column_letter
 from utils.storage import list_files, get_file_bytes, upload_file
 
 try:
-    from utils.supabase import load_setting, save_file
+    from utils.turso_storage import load_setting, save_file
 except ImportError:
     pass
 
