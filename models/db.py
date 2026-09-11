@@ -25,11 +25,12 @@ DEFAULT_DB_PATH = LOCAL_STORAGE_PATH / "dashboard.db"
 class _LibsqlConnection:
     """Adapteur DB-API qui synchronise chaque transaction vers libSQL."""
 
-    def __init__(self, connection):
+    def __init__(self, connection, sync_enabled: bool = True):
         object.__setattr__(self, "_connection", connection)
+        object.__setattr__(self, "_sync_enabled", sync_enabled)
 
     def __setattr__(self, name, value):
-        if name == "_connection":
+        if name in {"_connection", "_sync_enabled"}:
             object.__setattr__(self, name, value)
         elif name == "row_factory":
             object.__setattr__(self, name, value)
@@ -43,11 +44,13 @@ class _LibsqlConnection:
         return getattr(self._connection, name)
 
     def _sync(self):
+        if not self._sync_enabled:
+            return
         try:
             self._connection.sync()
         except ValueError as exc:
-            # libSQL interdit sync() pour les bases :memory:, utilisées par les tests.
-            if "Memory mode" not in str(exc):
+            # sync() est réservé aux connexions ouvertes avec sync_url.
+            if "mode" not in str(exc).lower():
                 raise
 
     def cursor(self, *args, **kwargs):
@@ -65,7 +68,13 @@ class _LibsqlConnection:
         return result
 
     def commit(self):
-        self._connection.commit()
+        try:
+            self._connection.commit()
+        except ValueError as exc:
+            # Hrana peut déjà avoir clôturé la transaction après executescript.
+            if "no transaction is active" not in str(exc):
+                raise
+            return
         self._sync()
 
     def rollback(self):
@@ -85,11 +94,9 @@ class _LibsqlConnection:
         return False
 
     def close(self):
-        try:
-            self._connection.commit()
-            self._sync()
-        finally:
-            self._connection.close()
+        # Ne pas appeler commit ici : la transaction peut déjà être fermée
+        # par Hrana, et les appelants qui écrivent font explicitement commit().
+        self._connection.close()
 
 
 class _LibsqlCursor:
@@ -213,15 +220,16 @@ def get_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
                 str(db_path),
                 sync_url=libsql_url,
                 auth_token=libsql_token,
-            )
+            ),
+            sync_enabled=True,
         )
-        conn.sync()
     else:
         conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=OFF;")  # Géré manuellement selon l'ordre d'ingestion
-    conn.execute("PRAGMA busy_timeout=10000;")
+    if not libsql_url:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA foreign_keys=OFF;")  # Géré manuellement selon l'ordre d'ingestion
+        conn.execute("PRAGMA busy_timeout=10000;")
 
     resolved_path = f"{db_path}|{libsql_url or 'sqlite'}"
     if resolved_path not in _schema_synced_paths:
@@ -259,9 +267,9 @@ def _make_read_connection(db_path: Optional[str | Path] = None) -> sqlite3.Conne
                 str(db_path),
                 sync_url=libsql_url,
                 auth_token=libsql_token,
-            )
+            ),
+            sync_enabled=True,
         )
-        conn.sync()
     else:
         conn = sqlite3.connect(
             str(db_path),
@@ -269,9 +277,10 @@ def _make_read_connection(db_path: Optional[str | Path] = None) -> sqlite3.Conne
             check_same_thread=False,  # nécessaire pour @st.cache_resource
         )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=10000;")
-    conn.execute("PRAGMA query_only=ON;")
+    if not libsql_url:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=10000;")
+        conn.execute("PRAGMA query_only=ON;")
     return conn
 
 
