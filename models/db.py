@@ -42,6 +42,14 @@ class _LibsqlConnection:
     def __getattr__(self, name):
         return getattr(self._connection, name)
 
+    def _sync(self):
+        try:
+            self._connection.sync()
+        except ValueError as exc:
+            # libSQL interdit sync() pour les bases :memory:, utilisées par les tests.
+            if "Memory mode" not in str(exc):
+                raise
+
     def cursor(self, *args, **kwargs):
         return _LibsqlCursor(self._connection.cursor(*args, **kwargs), self)
 
@@ -50,6 +58,38 @@ class _LibsqlConnection:
 
     def executemany(self, *args, **kwargs):
         return _LibsqlCursor(self._connection.executemany(*args, **kwargs), self)
+
+    def executescript(self, script):
+        result = self._connection.executescript(script)
+        self._sync()
+        return result
+
+    def commit(self):
+        self._connection.commit()
+        self._sync()
+
+    def rollback(self):
+        return self._connection.rollback()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self.close()
+        return False
+
+    def close(self):
+        try:
+            self._connection.commit()
+            self._sync()
+        finally:
+            self._connection.close()
 
 
 class _LibsqlCursor:
@@ -119,29 +159,6 @@ class _NamedRow:
 
     def keys(self):
         return self._columns
-
-    def commit(self):
-        self._connection.commit()
-        self._connection.sync()
-
-    def __enter__(self):
-        self._connection.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        if exc_type is None:
-            self.commit()
-        else:
-            self._connection.rollback()
-        self.close()
-        return False
-
-    def close(self):
-        try:
-            self._connection.commit()
-            self._connection.sync()
-        finally:
-            self._connection.close()
 
 
 def _libsql_settings() -> tuple[str | None, str | None]:
@@ -222,8 +239,7 @@ def execute_schema_file(conn: sqlite3.Connection, schema_file: Optional[Path | s
     with open(schema_file, "r", encoding="utf-8") as f:
         schema_sql = f.read()
 
-    cursor = conn.cursor()
-    cursor.executescript(schema_sql)
+    conn.executescript(schema_sql)
     conn.commit()
 
 
