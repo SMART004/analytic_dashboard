@@ -2,6 +2,8 @@
 import sqlite3
 import os
 import logging
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 from utils.config_storage import LOCAL_STORAGE_PATH, USE_LOCAL_STORAGE
@@ -20,6 +22,21 @@ except ImportError:
     _HAS_STREAMLIT = False
 
 DEFAULT_DB_PATH = LOCAL_STORAGE_PATH / "dashboard.db"
+
+_NAMED_PARAMETER = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _normalize_parameters(args):
+    """Convertit les mappings SQLite en paramètres positionnels libSQL."""
+    if len(args) < 2 or not isinstance(args[1], Mapping):
+        return args
+
+    query = args[0]
+    parameters = args[1]
+    names = _NAMED_PARAMETER.findall(query)
+    query = _NAMED_PARAMETER.sub("?", query)
+    values = tuple(parameters[name] for name in names)
+    return (query, values, *args[2:])
 
 
 class _LibsqlConnection:
@@ -57,9 +74,20 @@ class _LibsqlConnection:
         return _LibsqlCursor(self._connection.cursor(*args, **kwargs), self)
 
     def execute(self, *args, **kwargs):
-        return _LibsqlCursor(self._connection.execute(*args, **kwargs), self)
+        normalized = _normalize_parameters(args)
+        return _LibsqlCursor(self._connection.execute(*normalized, **kwargs), self)
 
     def executemany(self, *args, **kwargs):
+        if len(args) >= 2 and isinstance(args[1], (list, tuple)):
+            normalized_query = _normalize_parameters((args[0], args[1][0])) if args[1] else args
+            if normalized_query is not args:
+                query, _ = normalized_query
+                parameters = [
+                    _normalize_parameters((args[0], values))[1]
+                    if isinstance(values, Mapping) else values
+                    for values in args[1]
+                ]
+                args = (query, parameters, *args[2:])
         return _LibsqlCursor(self._connection.executemany(*args, **kwargs), self)
 
     def executescript(self, script):
@@ -110,10 +138,20 @@ class _LibsqlCursor:
         return getattr(self._cursor, name)
 
     def execute(self, *args, **kwargs):
-        self._cursor.execute(*args, **kwargs)
+        self._cursor.execute(*_normalize_parameters(args), **kwargs)
         return self
 
     def executemany(self, *args, **kwargs):
+        if len(args) >= 2 and isinstance(args[1], (list, tuple)) and args[1]:
+            normalized_query = _normalize_parameters((args[0], args[1][0]))
+            if normalized_query is not args:
+                query, _ = normalized_query
+                parameters = [
+                    _normalize_parameters((args[0], values))[1]
+                    if isinstance(values, Mapping) else values
+                    for values in args[1]
+                ]
+                args = (query, parameters, *args[2:])
         self._cursor.executemany(*args, **kwargs)
         return self
 

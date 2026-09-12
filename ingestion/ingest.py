@@ -139,7 +139,7 @@ def ingest_sites(conn: sqlite3.Connection):
         cursor.execute(
             """
             INSERT INTO sites (site_key, sitename, zone_new, territory_correct, isl_terr, quartier, dsm_name)
-            VALUES (:site_key, :sitename, :zone_new, :territory_correct, :isl_terr, :quartier, :dsm_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(site_key) DO UPDATE SET
                 zone_new=COALESCE(excluded.zone_new, sites.zone_new),
                 territory_correct=COALESCE(excluded.territory_correct, sites.territory_correct),
@@ -147,7 +147,15 @@ def ingest_sites(conn: sqlite3.Connection):
                 quartier=COALESCE(excluded.quartier, sites.quartier),
                 dsm_name=COALESCE(excluded.dsm_name, sites.dsm_name)
             """,
-            item,
+            (
+                item["site_key"],
+                item["sitename"],
+                item["zone_new"],
+                item["territory_correct"],
+                item["isl_terr"],
+                item["quartier"],
+                item["dsm_name"],
+            ),
         )
     conn.commit()
     logger.info(f"Ingested {len(sites_dict)} sites into SQLite.")
