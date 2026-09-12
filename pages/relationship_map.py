@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import polars as pl
 import streamlit as st
 
-from models.db import get_cached_connection
+from models.db import get_connection
 
 
 NODE_COLORS = {
@@ -24,7 +24,7 @@ NODE_COLORS = {
 @st.cache_data(ttl=300, show_spinner=False)
 def load_relationship_data() -> pl.DataFrame:
     """Charge les transactions et les référentiels déjà consolidés par l'ingestion."""
-    conn = get_cached_connection()
+    conn = get_connection()
     query = """
         SELECT t.date_only, t.tx_type, t.amount, t.from_msisdn, t.to_msisdn,
                t.from_name, t.to_name, t.territoire_snapshot, t.site_key_snapshot,
@@ -63,6 +63,7 @@ def load_relationship_data() -> pl.DataFrame:
     cursor = conn.execute(query)
     rows = cursor.fetchall()
     columns = [item[0] for item in cursor.description]
+    conn.close()
     if not rows:
         return pl.DataFrame({column: pl.Series(column, [], dtype=pl.Utf8) for column in columns})
 

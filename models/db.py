@@ -220,6 +220,7 @@ def get_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
                 str(db_path),
                 sync_url=libsql_url,
                 auth_token=libsql_token,
+                autocommit=True,
             ),
             sync_enabled=True,
         )
@@ -267,6 +268,7 @@ def _make_read_connection(db_path: Optional[str | Path] = None) -> sqlite3.Conne
                 str(db_path),
                 sync_url=libsql_url,
                 auth_token=libsql_token,
+                autocommit=True,
             ),
             sync_enabled=True,
         )
