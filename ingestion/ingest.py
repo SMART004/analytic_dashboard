@@ -425,7 +425,7 @@ def ingest_cds_referentiel(conn: sqlite3.Connection):
         return
 
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM hvc_cds_assignments")
+    cursor.execute("DELETE FROM cds_referentiel")
     count = 0
     for _, r in df.iterrows():
         clean_num = clean_phone(r.get(num_col))
@@ -896,7 +896,10 @@ def migrate_hvc_commercial_mapping(conn: sqlite3.Connection) -> None:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def run_referentiel_ingestion(conn: sqlite3.Connection | None = None) -> dict[str, int]:
+def run_referentiel_ingestion(
+    conn: sqlite3.Connection | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
     """
     Ingère tous les référentiels (sites, POS, commerciaux, exclusions, CDS,
     Point Relais/Caisses, mapping HVC, quota HVC/CDS) depuis les fichiers
@@ -911,61 +914,70 @@ def run_referentiel_ingestion(conn: sqlite3.Connection | None = None) -> dict[st
     settings en direct, mais rien ne les poussait non plus vers SQLite après
     upload.
     """
-    close = conn is None
-    if conn is None:
-        conn = get_connection()
-
-    try:
-        logger.info("Ingesting sites...")
+    if conn is not None:
+        logger.info("Ingesting referentiel with provided connection...")
         ingest_sites(conn)
-
-        logger.info("Ingesting referentiel_pos...")
         ingest_referentiel_pos(conn)
-
-        logger.info("Ingesting referentiel_commerciaux...")
         ingest_referentiel_commerciaux(conn)
-
-        logger.info("Ingesting exclusions_reference...")
         ingest_exclusions(conn)
-
-        logger.info("Ingesting cds_referentiel...")
         ingest_cds_referentiel(conn)
-
-        logger.info("Ingesting point_relay_referentiel...")
         ingest_point_relay_referentiel(conn)
-
-        logger.info("Ingesting hvc_commercial_mapping...")
         migrate_hvc_commercial_mapping(conn)
         ingest_hvc_mapping(conn)
-
-        logger.info("Ingesting hvc_cds_assignments (quota HVC par CDS)...")
         ingest_hvc_cds_assignments(conn)
+        return _referentiel_counts(conn)
 
-        counts = {
-            "sites": conn.execute("SELECT COUNT(*) FROM sites").fetchone()[0],
-            "referentiel_pos": conn.execute("SELECT COUNT(*) FROM referentiel_pos").fetchone()[0],
-            "referentiel_commerciaux": conn.execute("SELECT COUNT(*) FROM referentiel_commerciaux").fetchone()[0],
-            "exclusions_reference": conn.execute("SELECT COUNT(*) FROM exclusions_reference").fetchone()[0],
-            "cds_referentiel": conn.execute("SELECT COUNT(*) FROM cds_referentiel").fetchone()[0],
-            "point_relay_referentiel": conn.execute("SELECT COUNT(*) FROM point_relay_referentiel").fetchone()[0],
-            "hvc_commercial_mapping": conn.execute("SELECT COUNT(*) FROM hvc_commercial_mapping").fetchone()[0],
-            "hvc_cds_assignments": conn.execute("SELECT COUNT(*) FROM hvc_cds_assignments").fetchone()[0],
-        }
-        logger.info(f"Referentiel ingestion completed: {counts}")
-        return counts
+    # Avec Turso, chaque étape possède une connexion courte. Les fonctions
+    # chargent d'abord les fichiers depuis stored_files puis écrivent en base;
+    # une connexion unique resterait inactive pendant ces lectures.
+    stages = [
+        ("sites", ingest_sites),
+        ("referentiel_pos", ingest_referentiel_pos),
+        ("referentiel_commerciaux", ingest_referentiel_commerciaux),
+        ("exclusions_reference", ingest_exclusions),
+        ("cds_referentiel", ingest_cds_referentiel),
+        ("point_relay_referentiel", ingest_point_relay_referentiel),
+        ("hvc_commercial_mapping", migrate_hvc_commercial_mapping),
+        ("hvc_commercial_mapping_data", ingest_hvc_mapping),
+        ("hvc_cds_assignments", ingest_hvc_cds_assignments),
+    ]
+    for label, stage in stages:
+        logger.info("Ingesting %s...", label)
+        stage_conn = get_connection(db_path)
+        try:
+            stage(stage_conn)
+        finally:
+            stage_conn.close()
+
+    counts_conn = get_connection(db_path)
+    try:
+        counts = _referentiel_counts(counts_conn)
     finally:
-        if close:
-            conn.close()
+        counts_conn.close()
+    logger.info("Referentiel ingestion completed: %s", counts)
+    return counts
+
+
+def _referentiel_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    return {
+        "sites": conn.execute("SELECT COUNT(*) FROM sites").fetchone()[0],
+        "referentiel_pos": conn.execute("SELECT COUNT(*) FROM referentiel_pos").fetchone()[0],
+        "referentiel_commerciaux": conn.execute("SELECT COUNT(*) FROM referentiel_commerciaux").fetchone()[0],
+        "exclusions_reference": conn.execute("SELECT COUNT(*) FROM exclusions_reference").fetchone()[0],
+        "cds_referentiel": conn.execute("SELECT COUNT(*) FROM cds_referentiel").fetchone()[0],
+        "point_relay_referentiel": conn.execute("SELECT COUNT(*) FROM point_relay_referentiel").fetchone()[0],
+        "hvc_commercial_mapping": conn.execute("SELECT COUNT(*) FROM hvc_commercial_mapping").fetchone()[0],
+        "hvc_cds_assignments": conn.execute("SELECT COUNT(*) FROM hvc_cds_assignments").fetchone()[0],
+    }
 
 
 def run_ingestion(db_path: str | Path | None = None):
     """Exécute le pipeline complet d'ingestion dans SQLite (référentiels + transactions)."""
+    run_referentiel_ingestion(db_path=db_path)
     conn = get_connection(db_path)
     try:
         logger.info("Initializing SQLite v1.1 schema...")
         execute_schema_file(conn)
-
-        run_referentiel_ingestion(conn)
 
         logger.info("Ingesting transaction files...")
         ingest_all_transactions(conn)
