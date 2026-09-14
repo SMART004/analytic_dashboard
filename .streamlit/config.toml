@@ -1,0 +1,12 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+websocketPingInterval = 30
+fileWatcherType = "none"
+
+[client]
+showErrorDetails = false

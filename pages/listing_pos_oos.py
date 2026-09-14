@@ -32,7 +32,6 @@ import streamlit as st
 
 import matplotlib
 
-from utils.turso_storage import load_setting
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -48,6 +47,20 @@ from utils.helpers import clean_phone, to_excel
 SESSION_KEY_MASTER_II = "maitre_pos"        # Maître POS Centre II
 SESSION_KEY_MASTER_III = "maitre_pos_III"   # Maître POS Centre III
 SESSION_KEY_COMMERCIAL = "hvc_commercial"   # Mapping HVC_MSISDN -> Ccial en charge
+
+_SESSION_SETTINGS_KEYS = {
+    "zones": "zones_df",
+    "maitre_pos": "pos_master_df",
+    "maitre_pos_III": "pos_master_III_df",
+    "hvc_commercial": "hvc_commercial_df",
+}
+
+
+def _load_session_setting(folder_name: str) -> Optional[pd.DataFrame]:
+    """Charge uniquement les référentiels déjà présents dans la session."""
+    key = _SESSION_SETTINGS_KEYS.get(folder_name, folder_name)
+    value = st.session_state.get(key)
+    return value if isinstance(value, pd.DataFrame) else None
 
 REQUIRED_COLS = [
     "Day_Target", "Float", "OOS", "Last Trx Time",
@@ -272,14 +285,14 @@ def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster"
 def show_pos_oos_listing():
     st.title("Listing POS OOS")
 
-    zones_df = load_setting('zones')
+    zones_df = _load_session_setting("zones")
     if zones_df is None:
         st.error("Veuillez charger le fichier **Zones** dans Settings")
         st.stop()
 
-    master_ii = load_setting(SESSION_KEY_MASTER_II)
-    master_iii = load_setting(SESSION_KEY_MASTER_III)
-    commercial_df = load_setting(SESSION_KEY_COMMERCIAL)
+    master_ii = _load_session_setting(SESSION_KEY_MASTER_II)
+    master_iii = _load_session_setting(SESSION_KEY_MASTER_III)
+    commercial_df = _load_session_setting(SESSION_KEY_COMMERCIAL)
 
     if master_ii is None and master_iii is None:
         st.warning("Aucun fichier Maître POS (Centre II / Centre III) trouvé dans Settings — 'Nom du POS' restera vide.")

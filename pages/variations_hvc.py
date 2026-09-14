@@ -45,12 +45,6 @@ import streamlit as st
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
-from utils.storage import list_files, get_file_bytes, upload_file
-
-try:
-    from utils.turso_storage import load_setting, save_file
-except ImportError:
-    pass
 
 # --------------------------------------------------------------------------
 # Constantes & Configuration
@@ -70,6 +64,20 @@ COLOR_GREEN = "#16a34a"
 COLOR_YELLOW = "#ca8a04"
 COLOR_RED = "#dc2626"
 COLOR_GRAY = "#6b7280"
+
+_SESSION_SETTINGS_KEYS = {
+    "zones": "zones_df",
+    "sites_etoudi": "sites_etoudi_df",
+    "commerciaux": "commercial_config_df",
+    "hvc_commercial": "hvc_commercial_df",
+}
+_SESSION_VARIATION_FILES = "variations_hvc_session_files"
+
+
+def _load_session_setting(folder_name: str) -> pd.DataFrame | None:
+    key = _SESSION_SETTINGS_KEYS.get(folder_name, folder_name)
+    value = st.session_state.get(key)
+    return value if isinstance(value, pd.DataFrame) else None
 
 
 # --------------------------------------------------------------------------
@@ -102,8 +110,9 @@ def save_data_upload(uploaded_file) -> str:
         ext = original_name.split(".")[-1] if "." in original_name else "xlsx"
         uploaded_file.name = f"data_{ts.strftime('%Y%m%d_%H%M%S')}.{ext}"
 
-    success = upload_file(uploaded_file, STORAGE_FOLDER_DATA)
-    return uploaded_file.name if success else ""
+    files = st.session_state.setdefault(_SESSION_VARIATION_FILES, {})
+    files[uploaded_file.name] = uploaded_file.getvalue()
+    return uploaded_file.name
 
 
 def save_zones_file(uploaded_file) -> str:
@@ -111,12 +120,13 @@ def save_zones_file(uploaded_file) -> str:
         return ""
     ext = uploaded_file.name.split(".")[-1] if "." in uploaded_file.name else "xlsx"
     uploaded_file.name = f"zones_reference.{ext}"
-    success = upload_file(uploaded_file, STORAGE_FOLDER_ZONES)
-    return uploaded_file.name if success else ""
+    files = st.session_state.setdefault(_SESSION_VARIATION_FILES, {})
+    files[uploaded_file.name] = uploaded_file.getvalue()
+    return uploaded_file.name
 
 
 def list_data_uploads() -> List[Dict[str, Any]]:
-    file_list = list_files(STORAGE_FOLDER_DATA)
+    file_list = list(st.session_state.get(_SESSION_VARIATION_FILES, {}).keys())
     items = []
 
     for item in file_list:
@@ -148,7 +158,7 @@ def list_data_uploads() -> List[Dict[str, Any]]:
 def load_dsm_mapping_from_settings() -> pd.DataFrame:
     df_dsm = None
     for key in ["dsm_mapping", "sites_etoudi", "commerciaux", "settings"]:
-        res = load_setting(key)
+        res = _load_session_setting(key)
         if res is not None and isinstance(res, pd.DataFrame) and not res.empty:
             df_dsm = res
             break
@@ -171,7 +181,7 @@ def load_dsm_mapping_from_settings() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_zones_mapping_from_setting() -> pd.DataFrame:
-    zones = load_setting("zones")
+    zones = _load_session_setting("zones")
     if zones is None or zones.empty:
         return pd.DataFrame()
 
@@ -858,8 +868,14 @@ def render_oos_variation() -> None:
 
         st.markdown(f"### 🔄 Comparaison : **{old_label}** ➔ **{new_label}**")
 
-        old_df = load_site_level_data_bytes(get_file_bytes(STORAGE_FOLDER_DATA, older["name"]))
-        new_df = load_site_level_data_bytes(get_file_bytes(STORAGE_FOLDER_DATA, newer["name"]))
+        files = st.session_state.get(_SESSION_VARIATION_FILES, {})
+        old_bytes = files.get(older["name"])
+        new_bytes = files.get(newer["name"])
+        if old_bytes is None or new_bytes is None:
+            st.error("Les fichiers de variation ne sont plus disponibles dans cette session.")
+            return
+        old_df = load_site_level_data_bytes(old_bytes)
+        new_df = load_site_level_data_bytes(new_bytes)
 
         multi_df = compute_multiindex_variation(old_df, new_df, zones_df, dsm_df, old_label, new_label)
 
