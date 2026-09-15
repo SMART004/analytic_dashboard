@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from io import BytesIO
 from typing import Any
 
@@ -9,6 +10,20 @@ import pandas as pd
 import streamlit as st
 
 from models.db import get_connection
+
+REMOTE_RETRIES = 3
+
+
+def _with_retries(operation, label: str):
+    last_error = None
+    for attempt in range(REMOTE_RETRIES):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < REMOTE_RETRIES:
+                time.sleep(2**attempt)
+    raise RuntimeError(f"{label} a échoué après {REMOTE_RETRIES} tentatives") from last_error
 
 
 def _ensure_table(conn) -> None:
@@ -43,60 +58,72 @@ def _read_dataframe(content: bytes, file_name: str) -> pd.DataFrame:
 def save_bytes(bucket: str, file_path: str, content: bytes, file_name: str | None = None, content_type: str | None = None) -> None:
     file_name = file_name or file_path.rsplit("/", 1)[-1]
     digest = hashlib.md5(content).hexdigest()
-    with get_connection() as conn:
-        _ensure_table(conn)
-        conn.execute(
-            """
-            INSERT INTO stored_files
-                (bucket, file_path, file_name, content, content_type, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(bucket, file_path) DO UPDATE SET
-                file_name=excluded.file_name,
-                content=excluded.content,
-                content_type=excluded.content_type,
-                content_hash=excluded.content_hash,
-                created_at=CURRENT_TIMESTAMP
-            """,
-            (bucket, file_path, file_name, content, content_type, digest),
-        )
+    def operation():
+        with get_connection() as conn:
+            _ensure_table(conn)
+            conn.execute(
+                """
+                INSERT INTO stored_files
+                    (bucket, file_path, file_name, content, content_type, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bucket, file_path) DO UPDATE SET
+                    file_name=excluded.file_name,
+                    content=excluded.content,
+                    content_type=excluded.content_type,
+                    content_hash=excluded.content_hash,
+                    created_at=CURRENT_TIMESTAMP
+                """,
+                (bucket, file_path, file_name, content, content_type, digest),
+            )
+
+    _with_retries(operation, f"Enregistrement de {file_path}")
 
 
 def load_bytes(bucket: str, file_path: str) -> bytes | None:
-    with get_connection() as conn:
-        _ensure_table(conn)
-        row = conn.execute(
-            "SELECT content FROM stored_files WHERE bucket = ? AND file_path = ?",
-            (bucket, file_path),
-        ).fetchone()
-    return bytes(row[0]) if row else None
+    def operation():
+        with get_connection() as conn:
+            _ensure_table(conn)
+            row = conn.execute(
+                "SELECT content FROM stored_files WHERE bucket = ? AND file_path = ?",
+                (bucket, file_path),
+            ).fetchone()
+        return bytes(row[0]) if row else None
+
+    return _with_retries(operation, f"Lecture de {file_path}")
 
 
 def list_objects(bucket: str, prefix: str = "") -> list[dict[str, Any]]:
-    with get_connection() as conn:
-        _ensure_table(conn)
-        rows = conn.execute(
-            """
-            SELECT file_path, file_name, content_hash, created_at
-            FROM stored_files
-            WHERE bucket = ? AND file_path LIKE ?
-            ORDER BY file_path
-            """,
-            (bucket, f"{prefix}%"),
-        ).fetchall()
-    return [
-        {"name": row[0], "file_name": row[1], "content_hash": row[2], "created_at": row[3]}
-        for row in rows
-    ]
+    def operation():
+        with get_connection() as conn:
+            _ensure_table(conn)
+            rows = conn.execute(
+                """
+                SELECT file_path, file_name, content_hash, created_at
+                FROM stored_files
+                WHERE bucket = ? AND file_path LIKE ?
+                ORDER BY file_path
+                """,
+                (bucket, f"{prefix}%"),
+            ).fetchall()
+        return [
+            {"name": row[0], "file_name": row[1], "content_hash": row[2], "created_at": row[3]}
+            for row in rows
+        ]
+
+    return _with_retries(operation, f"Liste du dossier {prefix or bucket}")
 
 
 def delete_objects(bucket: str, prefix: str = "") -> int:
-    with get_connection() as conn:
-        _ensure_table(conn)
-        cursor = conn.execute(
-            "DELETE FROM stored_files WHERE bucket = ? AND file_path LIKE ?",
-            (bucket, f"{prefix}%"),
-        )
-        return cursor.rowcount
+    def operation():
+        with get_connection() as conn:
+            _ensure_table(conn)
+            cursor = conn.execute(
+                "DELETE FROM stored_files WHERE bucket = ? AND file_path LIKE ?",
+                (bucket, f"{prefix}%"),
+            )
+            return cursor.rowcount
+
+    return _with_retries(operation, f"Suppression du dossier {prefix or bucket}")
 
 
 def save_file(file, folder_name: str) -> str:

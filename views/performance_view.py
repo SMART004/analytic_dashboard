@@ -164,11 +164,19 @@ def _render_upload_sync_section(segment: Segment) -> None:
                     if selected_folders:
                         with st.spinner("Ingestion des fichiers dans SQLite..."):
                             res = sync_segment_to_sqlite(segment, selected_folders)
-                            st.success(
-                                f"✅ Synchronisation terminée : {res['lignes_inserees']} "
-                                f"nouvelle(s) ligne(s) insérée(s) sur {res['lignes_chargees']} "
-                                f"lues ({res['fichiers']} fichier(s))."
-                            )
+                            if res.get("fichiers_en_erreur", 0):
+                                st.warning(
+                                    f"Synchronisation partielle : {res['fichiers_en_erreur']} "
+                                    "fichier(s) n'ont pas pu être téléchargé(s). "
+                                    "Relancez la synchronisation pour reprendre. "
+                                    f"{res['lignes_inserees']} nouvelle(s) ligne(s) insérée(s)."
+                                )
+                            else:
+                                st.success(
+                                    f"✅ Synchronisation terminée : {res['lignes_inserees']} "
+                                    f"nouvelle(s) ligne(s) insérée(s) sur {res['lignes_chargees']} "
+                                    f"lues ({res['fichiers']} fichier(s))."
+                                )
                             st.cache_data.clear()
                             st.rerun()
                     else:

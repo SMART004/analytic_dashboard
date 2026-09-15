@@ -9,6 +9,7 @@ import hashlib
 import logging
 import sqlite3
 import re
+import time
 import unicodedata
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,8 @@ from utils.helpers import clean_phone
 from utils.turso_storage import load_setting
 
 logger = logging.getLogger(__name__)
+
+REFERENTIEL_RETRIES = 3
 
 ZONE_MAPPING = {
     "WD": "WILLY DISTRIBUTION",
@@ -951,11 +954,33 @@ def run_referentiel_ingestion(
     ]
     for label, stage in stages:
         logger.info("Ingesting %s...", label)
-        stage_conn = get_connection(db_path)
-        try:
-            stage(stage_conn)
-        finally:
-            stage_conn.close()
+        last_error = None
+        for attempt in range(REFERENTIEL_RETRIES):
+            stage_conn = None
+            try:
+                stage_conn = get_connection(db_path)
+                stage(stage_conn)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Etape %s interrompue (tentative %s/%s): %s",
+                    label,
+                    attempt + 1,
+                    REFERENTIEL_RETRIES,
+                    exc,
+                )
+                if attempt + 1 < REFERENTIEL_RETRIES:
+                    time.sleep(2**attempt)
+            finally:
+                if stage_conn is not None:
+                    stage_conn.close()
+
+        if last_error is not None:
+            raise RuntimeError(
+                f"Synchronisation du référentiel '{label}' impossible"
+            ) from last_error
 
     counts_conn = get_connection(db_path)
     try:

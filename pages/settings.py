@@ -8,14 +8,10 @@ from utils.turso_storage import load_setting
 def _handle_reference_upload(**kwargs):
     uploaded = handle_upload(**kwargs)
     if uploaded:
-        with st.spinner("Synchronisation SQLite en cours..."):
-            try:
-                run_referentiel_ingestion()
-            except Exception as exc:
-                st.error(f"Echec de la synchronisation SQLite : {exc}")
-            else:
-                st.cache_data.clear()
-                st.success("Synchronisation SQLite effectuee.")
+        st.info(
+            "Fichier chargé. Cliquez sur « Synchroniser les référentiels vers SQLite » "
+            "après avoir terminé vos uploads."
+        )
     return uploaded
 
 
@@ -273,8 +269,8 @@ def show_settings():
     st.caption(
         "Les fichiers uploades ci-dessus sont stockes, mais les pages de "
         "l'application (Dashboard, Performance, Conquete, OOS...) lisent la "
-        "base SQLite, pas les fichiers directement. Cliquez ci-dessous apres "
-        "chaque upload pour que les changements soient pris en compte."
+        "base SQLite, pas les fichiers directement. Chargez les fichiers necessaires, "
+        "puis cliquez ci-dessous une seule fois pour appliquer les changements."
     )
 
     if st.button("🔄 Synchroniser les référentiels vers SQLite", type="primary", key="settings_sync_btn"):

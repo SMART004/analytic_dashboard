@@ -21,6 +21,7 @@ from __future__ import annotations
 import concurrent.futures
 import io
 import logging
+import time
 from typing import Literal, Any
 
 import pandas as pd
@@ -31,7 +32,13 @@ from datetime import date, datetime
 from ingestion.ingest import ingest_transaction_dataframe
 from ingestion.ingest_oos import ingest_listing_oos_dataframe, ingest_hvc_variation_dataframe
 from models.db import get_connection
-from utils.storage import get_files_by_month, list_month_folders, upload_file_by_month
+from utils.storage import (
+    download_month_file,
+    get_files_by_month,
+    get_month_files,
+    list_month_folders,
+    upload_file_by_month,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +51,8 @@ SEGMENT_BUCKETS: dict[Segment, str] = {
     "pr_caisse": "performance-pos-caisse-result-files",
     "cds": "performance-cds-result-files",
 }
+
+SYNC_DOWNLOAD_RETRIES = 3
 
 
 def get_bucket_for_segment(segment: Segment) -> str:
@@ -132,50 +141,97 @@ def sync_segment_to_sqlite(
     conn=None,
 ) -> dict[str, int]:
     """
-    Charge un ou plusieurs dossiers du bucket d'un segment et les ingère
-    dans SQLite. Un fichier déjà ingéré (même tx_date/from/to/amount/type)
-    est silencieusement ignoré grâce à la contrainte UNIQUE de la table
-    transactions — cette fonction est donc idempotente et peut être
-    rappelée à chaque visite de page sans dupliquer les données.
+    Charge et ingère les fichiers un par un. Un fichier déjà ingéré (même
+    tx_date/from/to/amount/type) est silencieusement ignoré grâce à la
+    contrainte UNIQUE de la table transactions.
 
-    Retourne {"lignes_chargees": N, "lignes_inserees": M, "fichiers": K}.
+    Chaque fichier est téléchargé avec reprise locale et écrit immédiatement
+    dans SQLite. Une coupure réseau ne fait donc perdre que le fichier en
+    cours, et un nouvel appel reprend les fichiers restants sans retraiter les
+    lignes déjà validées.
+
+    Retourne {"lignes_chargees": N, "lignes_inserees": M, "fichiers": K,
+    "fichiers_en_erreur": E}.
     """
     bucket = get_bucket_for_segment(segment)
-    df, loaded_folders = load_bucket_folders(bucket, folders)
+    total_loaded = 0
+    total_inserted = 0
+    processed_files = 0
+    failed_files = 0
 
-    if df.empty:
-        return {"lignes_chargees": 0, "lignes_inserees": 0, "fichiers": 0}
+    for folder in folders:
+        try:
+            month_files = get_month_files(bucket, folder)
+        except Exception as exc:
+            logger.warning("Erreur listing dossier %s (bucket %s): %s", folder, bucket, exc)
+            failed_files += 1
+            continue
 
-    close = conn is None
-    if conn is None:
-        conn = get_connection()
+        for file_info in month_files:
+            frame = None
+            last_error = None
+            for attempt in range(SYNC_DOWNLOAD_RETRIES):
+                try:
+                    frame = download_month_file(bucket, folder, file_info)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt + 1 < SYNC_DOWNLOAD_RETRIES:
+                        time.sleep(2**attempt)
 
-    try:
-        source_col = "source_file" if "source_file" in df.columns else None
-        total_inserted = 0
-        nb_fichiers = 0
-
-        if source_col:
-            for source_filename, group in df.groupby(source_col, dropna=False):
-                nb_fichiers += 1
-                total_inserted += ingest_transaction_dataframe(
-                    conn, group, str(source_filename) or f"{bucket}_sans_nom"
+            if frame is None:
+                failed_files += 1
+                logger.warning(
+                    "Fichier ignoré après %s tentatives: %s/%s: %s",
+                    SYNC_DOWNLOAD_RETRIES,
+                    folder,
+                    file_info.get("name", ""),
+                    last_error,
                 )
-        else:
-            # Pas de colonne source_file exploitable : on ingère le dossier
-            # entier comme une seule unité de traçabilité.
-            nb_fichiers = 1
-            label = f"{bucket}/{'+'.join(loaded_folders)}"
-            total_inserted = ingest_transaction_dataframe(conn, df, label)
+                continue
 
-        return {
-            "lignes_chargees": len(df),
-            "lignes_inserees": total_inserted,
-            "fichiers": nb_fichiers,
-        }
-    finally:
-        if close:
-            conn.close()
+            processed_files += 1
+            if frame.empty:
+                continue
+
+            source_name = str(file_info.get("name") or f"{bucket}/{folder}")
+            ingestion_succeeded = False
+            for attempt in range(SYNC_DOWNLOAD_RETRIES):
+                close = conn is None
+                active_conn = conn or get_connection()
+                try:
+                    inserted = ingest_transaction_dataframe(
+                        active_conn, frame, source_name
+                    )
+                    ingestion_succeeded = True
+                    total_loaded += len(frame)
+                    total_inserted += inserted
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt + 1 < SYNC_DOWNLOAD_RETRIES:
+                        time.sleep(2**attempt)
+                finally:
+                    if close:
+                        active_conn.close()
+
+            if not ingestion_succeeded:
+                processed_files -= 1
+                failed_files += 1
+                logger.warning(
+                    "Erreur ingestion après %s tentatives: %s/%s: %s",
+                    SYNC_DOWNLOAD_RETRIES,
+                    folder,
+                    source_name,
+                    last_error,
+                )
+
+    return {
+        "lignes_chargees": total_loaded,
+        "lignes_inserees": total_inserted,
+        "fichiers": processed_files,
+        "fichiers_en_erreur": failed_files,
+    }
 
 
 def sync_oos_to_sqlite(uploaded_file: Any) -> dict:
