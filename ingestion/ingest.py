@@ -910,6 +910,7 @@ def migrate_hvc_commercial_mapping(conn: sqlite3.Connection) -> None:
 def run_referentiel_ingestion(
     conn: sqlite3.Connection | None = None,
     db_path: str | Path | None = None,
+    progress_callback=None,
 ) -> dict[str, int]:
     """
     Ingère tous les référentiels (sites, POS, commerciaux, exclusions, CDS,
@@ -927,15 +928,25 @@ def run_referentiel_ingestion(
     """
     if conn is not None:
         logger.info("Ingesting referentiel with provided connection...")
+        if progress_callback:
+            progress_callback(0, "Synchronisation des référentiels...")
         ingest_sites(conn)
+        if progress_callback:
+            progress_callback(20, "Sites synchronisés")
         ingest_referentiel_pos(conn)
+        if progress_callback:
+            progress_callback(40, "Référentiel POS synchronisé")
         ingest_referentiel_commerciaux(conn)
+        if progress_callback:
+            progress_callback(50, "Commerciaux synchronisés")
         ingest_exclusions(conn)
         ingest_cds_referentiel(conn)
         ingest_point_relay_referentiel(conn)
         migrate_hvc_commercial_mapping(conn)
         ingest_hvc_mapping(conn)
         ingest_hvc_cds_assignments(conn)
+        if progress_callback:
+            progress_callback(100, "Référentiels synchronisés")
         return _referentiel_counts(conn)
 
     # Avec Turso, chaque étape possède une connexion courte. Les fonctions
@@ -952,8 +963,13 @@ def run_referentiel_ingestion(
         ("hvc_commercial_mapping_data", ingest_hvc_mapping),
         ("hvc_cds_assignments", ingest_hvc_cds_assignments),
     ]
-    for label, stage in stages:
+    for stage_index, (label, stage) in enumerate(stages, start=1):
         logger.info("Ingesting %s...", label)
+        if progress_callback:
+            progress_callback(
+                int((stage_index - 1) / len(stages) * 100),
+                f"Synchronisation : {label}...",
+            )
         last_error = None
         for attempt in range(REFERENTIEL_RETRIES):
             stage_conn = None
@@ -981,6 +997,12 @@ def run_referentiel_ingestion(
             raise RuntimeError(
                 f"Synchronisation du référentiel '{label}' impossible"
             ) from last_error
+
+        if progress_callback:
+            progress_callback(
+                int(stage_index / len(stages) * 100),
+                f"{label} synchronisé",
+            )
 
     counts_conn = get_connection(db_path)
     try:

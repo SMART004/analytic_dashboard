@@ -23,6 +23,7 @@ Fonctionnement :
 
 import io
 import re
+import time
 import zipfile
 from typing import Optional
 
@@ -60,6 +61,7 @@ _SESSION_SETTINGS_KEYS = {
 }
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def _read_canonical_settings() -> dict[str, pd.DataFrame]:
     """Lit les référentiels canoniques créés par run_referentiel_ingestion."""
     conn = get_connection()
@@ -116,17 +118,23 @@ def _read_database_query(query: str, conn) -> pl.DataFrame:
     return pl.read_database(query=query, connection=conn)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_database_settings() -> dict[str, pd.DataFrame]:
+def _load_database_settings(progress_callback=None) -> dict[str, pd.DataFrame]:
     """Charge les tables canoniques et les initialise depuis Settings si vides."""
+    started_at = time.perf_counter()
     settings = _read_canonical_settings()
     required = ("zones", "maitre_pos", "maitre_pos_III", "hvc_commercial")
     if any(settings[name].empty for name in required):
         try:
-            run_referentiel_ingestion()
+            if progress_callback:
+                progress_callback(5, "Tables Turso incomplètes, synchronisation...")
+            run_referentiel_ingestion(progress_callback=progress_callback)
+            _read_canonical_settings.clear()
             settings = _read_canonical_settings()
         except Exception as exc:
             st.warning(f"Initialisation des référentiels impossible : {exc}")
+    st.session_state["listing_oos_database_load_seconds"] = round(
+        time.perf_counter() - started_at, 2
+    )
     return settings
 
 
@@ -136,11 +144,16 @@ def _load_persisted_setting(folder_name: str) -> Optional[pd.DataFrame]:
     return load_setting(folder_name)
 
 
-def _load_session_setting(folder_name: str) -> Optional[pd.DataFrame]:
+def _load_session_setting(
+    folder_name: str,
+    database_settings: Optional[dict[str, pd.DataFrame]] = None,
+) -> Optional[pd.DataFrame]:
     """Priorise les tables Turso, puis session et fichier Settings en repli."""
     key = _SESSION_SETTINGS_KEYS.get(folder_name, folder_name)
 
-    database_value = _load_database_settings().get(folder_name)
+    if database_settings is None:
+        database_settings = _load_database_settings()
+    database_value = database_settings.get(folder_name)
     if isinstance(database_value, pd.DataFrame) and not database_value.empty:
         st.session_state[key] = database_value
         return database_value
@@ -384,16 +397,35 @@ def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster"
 # Page principale
 # ==========================================================================
 def show_pos_oos_listing():
+    total_started_at = time.perf_counter()
+    progress = st.progress(0, text="Initialisation du Listing OOS...")
+    phase_started_at = time.perf_counter()
+    timings: dict[str, float] = {}
+
+    def finish_phase(name: str, progress_value: int, message: str) -> None:
+        timings[name] = round(time.perf_counter() - phase_started_at, 2)
+        progress.progress(progress_value, text=message)
+
     st.title("Listing POS OOS")
 
-    zones_df = _load_session_setting("zones")
+    database_settings = _load_database_settings(
+        progress_callback=lambda value, message: progress.progress(
+            min(20, 5 + int(value * 0.15)), text=message
+        )
+    )
+    finish_phase("Chargement Turso / référentiels", 20, "Référentiels chargés")
+
+    phase_started_at = time.perf_counter()
+    zones_df = _load_session_setting("zones", database_settings)
     if zones_df is None:
+        progress.empty()
         st.error("Veuillez charger le fichier **Zones** dans Settings")
         st.stop()
 
-    master_ii = _load_session_setting(SESSION_KEY_MASTER_II)
-    master_iii = _load_session_setting(SESSION_KEY_MASTER_III)
-    commercial_df = _load_session_setting(SESSION_KEY_COMMERCIAL)
+    master_ii = _load_session_setting(SESSION_KEY_MASTER_II, database_settings)
+    master_iii = _load_session_setting(SESSION_KEY_MASTER_III, database_settings)
+    commercial_df = _load_session_setting(SESSION_KEY_COMMERCIAL, database_settings)
+    finish_phase("Préparation des référentiels", 30, "Référentiels prêts")
 
     if master_ii is None and master_iii is None:
         st.warning("Aucun fichier Maître POS (Centre II / Centre III) trouvé dans Settings — 'Nom du POS' restera vide.")
@@ -409,12 +441,16 @@ def show_pos_oos_listing():
         key="pos_oos_listing_files",
     )
     if not oos_files:
+        progress.progress(100, text="En attente du fichier Listing OOS")
         st.info("Chargez au moins un fichier pour afficher le listing.")
         st.stop()
 
+    phase_started_at = time.perf_counter()
     raw_frames = [_read_uploaded_file(file) for file in oos_files]
     raw_df = pl.concat(raw_frames, how="diagonal_relaxed").to_pandas()
+    finish_phase("Lecture des fichiers", 45, "Fichiers lus")
 
+    phase_started_at = time.perf_counter()
     df_oos = _select_required_columns(raw_df, REQUIRED_COLS)
     if "MSISDN" not in df_oos.columns:
         st.error("La colonne MSISDN est introuvable dans le(s) fichier(s) importé(s).")
@@ -423,8 +459,10 @@ def show_pos_oos_listing():
     df_oos["MSISDN"] = df_oos["MSISDN"].astype(str).str.strip()
     df_oos["MSISDN_clean"] = df_oos["MSISDN"].apply(clean_phone)
     df_oos = df_oos.dropna(subset=["MSISDN_clean"]).drop_duplicates(subset="MSISDN_clean", keep="last")
+    finish_phase("Nettoyage des données", 60, "Données nettoyées")
 
     # ===================== MAPPING NOM DU POS (Centre II / Centre III) ====
+    phase_started_at = time.perf_counter()
     map_ii = _build_msisdn_map(master_ii, ["agent_msisdn", "Agent MSISDN"], ["full_name", "Full Name"])
     map_iii = _build_msisdn_map(master_iii, ["agent_msisdn", "Agent MSISDN"], ["full_name", "Full Name"])
 
@@ -444,8 +482,10 @@ def show_pos_oos_listing():
         ["Ccial en charge"],
     )
     df_oos["Ccial en charge"] = df_oos["MSISDN_clean"].map(ccial_map).fillna("Non attribué")
+    finish_phase("Enrichissement des POS", 70, "Noms et commerciaux associés")
 
     # ===================== FILTRES =====================
+    phase_started_at = time.perf_counter()
     st.sidebar.markdown("---")
     st.sidebar.subheader("Filtres")
 
@@ -489,8 +529,10 @@ def show_pos_oos_listing():
 
     territory_list_full = sorted(df_oos["Territory"].dropna().unique().tolist()) if "Territory" in df_oos.columns else []
     selected_territories = st.sidebar.multiselect("🌍 Filtre Territoire", territory_list_full, default=territory_list_full, key="oos_territory_multi_filter")
+    finish_phase("Préparation des filtres", 80, "Filtres prêts")
 
     # ===================== COLONNES FINALES =====================
+    phase_started_at = time.perf_counter()
     display_df = pd.DataFrame()
     display_df['Numero du POS'] = df_oos.get('MSISDN')
     display_df['Nom du POS'] = df_oos.get('Nom du POS')
@@ -530,6 +572,7 @@ def show_pos_oos_listing():
     display_df['OOS'] = display_df['OOS'].fillna(0).astype(int)
     display_df['Float'] = display_df['Float'].fillna(0).astype(int)
     display_df = display_df.reset_index(drop=True)
+    finish_phase("Application des filtres", 90, "Résultats calculés")
 
     # ===================== COULEURS (colonnes entières) =====================
     def color_row(row):
@@ -548,8 +591,10 @@ def show_pos_oos_listing():
     # ===================== AFFICHAGE =====================
     st.subheader(f"{len(display_df)} POS en rupture")
     st.dataframe(styled_df, use_container_width=True, height=650)
+    finish_phase("Affichage du tableau", 93, "Tableau affiché")
 
     # ===================== EXPORTS =====================
+    phase_started_at = time.perf_counter()
     st.markdown("#### Export")
     c1, c2, c3 = st.columns(3)
 
@@ -581,3 +626,16 @@ def show_pos_oos_listing():
             "POS_OOS_Alert.csv",
             "text/csv",
         )
+    finish_phase("Préparation des exports", 98, "Exports prêts")
+
+    timings["Total"] = round(time.perf_counter() - total_started_at, 2)
+    progress.progress(100, text=f"Terminé en {timings['Total']:.2f} s")
+    if st.sidebar.checkbox("Afficher le diagnostic performance", key="oos_show_performance"):
+        with st.expander("Diagnostic performance", expanded=True):
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Phase": name, "Durée (s)": duration} for name, duration in timings.items()]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
