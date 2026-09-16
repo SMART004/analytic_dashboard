@@ -28,6 +28,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import streamlit as st
 
 import matplotlib
@@ -63,7 +64,7 @@ def _read_canonical_settings() -> dict[str, pd.DataFrame]:
     """Lit les référentiels canoniques créés par run_referentiel_ingestion."""
     conn = get_connection()
     try:
-        zones = pd.read_sql_query(
+        zones = _read_database_query(
             """
             SELECT site_key, sitename AS "SITENAME", zone_new AS "ZONE NEW",
                    territory_correct AS "TERRITORY CORRECT",
@@ -71,8 +72,8 @@ def _read_canonical_settings() -> dict[str, pd.DataFrame]:
             FROM sites
             """,
             conn,
-        )
-        master_pos = pd.read_sql_query(
+        ).to_pandas()
+        master_pos = _read_database_query(
             """
             SELECT agent_msisdn, source_master, full_name, zone_centre AS zone,
                    zone_territoire AS territory, secteur_cluster AS cluster,
@@ -81,8 +82,8 @@ def _read_canonical_settings() -> dict[str, pd.DataFrame]:
             WHERE source_master = 'maitre_pos'
             """,
             conn,
-        )
-        master_pos_iii = pd.read_sql_query(
+        ).to_pandas()
+        master_pos_iii = _read_database_query(
             """
             SELECT agent_msisdn, source_master, full_name, zone_centre AS zone,
                    zone_territoire AS territory, secteur_cluster AS cluster,
@@ -91,15 +92,15 @@ def _read_canonical_settings() -> dict[str, pd.DataFrame]:
             WHERE source_master = 'maitre_pos_III'
             """,
             conn,
-        )
-        hvc_commercial = pd.read_sql_query(
+        ).to_pandas()
+        hvc_commercial = _read_database_query(
             """
             SELECT hvc_msisdn AS HVC_MSISDN,
                    ccial_en_charge AS "Ccial en charge"
             FROM hvc_commercial_mapping
             """,
             conn,
-        )
+        ).to_pandas()
         return {
             "zones": zones,
             "maitre_pos": master_pos,
@@ -108,6 +109,11 @@ def _read_canonical_settings() -> dict[str, pd.DataFrame]:
         }
     finally:
         conn.close()
+
+
+def _read_database_query(query: str, conn) -> pl.DataFrame:
+    """Exécute une requête DB-API et matérialise directement le résultat en Polars."""
+    return pl.read_database(query=query, connection=conn)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -181,6 +187,14 @@ def _select_required_columns(df: pd.DataFrame, required_cols) -> pd.DataFrame:
         st.warning(f"⚠️ Colonnes absentes du fichier importé : {', '.join(missing)}")
     keep = [c for c in required_cols if c in df.columns]
     return df[keep].copy()
+
+
+def _read_uploaded_file(file) -> pl.DataFrame:
+    """Lit un fichier Listing OOS avec Polars avant conversion finale en Pandas."""
+    content = file.getvalue()
+    if file.name.lower().endswith(".csv"):
+        return pl.read_csv(io.BytesIO(content), infer_schema_length=10000)
+    return pl.read_excel(io.BytesIO(content), engine="calamine")
 
 
 def _is_centre_ii(zone_value) -> bool:
@@ -398,13 +412,8 @@ def show_pos_oos_listing():
         st.info("Chargez au moins un fichier pour afficher le listing.")
         st.stop()
 
-    raw_frames = []
-    for f in oos_files:
-        if f.name.lower().endswith(".csv"):
-            raw_frames.append(pd.read_csv(f))
-        else:
-            raw_frames.append(pd.read_excel(f))
-    raw_df = pd.concat(raw_frames, ignore_index=True)
+    raw_frames = [_read_uploaded_file(file) for file in oos_files]
+    raw_df = pl.concat(raw_frames, how="diagonal_relaxed").to_pandas()
 
     df_oos = _select_required_columns(raw_df, REQUIRED_COLS)
     if "MSISDN" not in df_oos.columns:
