@@ -419,10 +419,12 @@ def insert_oos_rows(df: pd.DataFrame) -> int:
                 {update_sets}
         """
 
-        for _, row in work.iterrows():
-            values = [None if pd.isna(row[c]) else row[c] for c in available]
-            cursor.execute(sql, values)
-            inserted += 1
+        rows_data = [
+            [None if pd.isna(row[c]) else row[c] for c in available]
+            for _, row in work.iterrows()
+        ]
+        cursor.executemany(sql, rows_data)
+        inserted = len(rows_data)
 
         conn.commit()
         return inserted

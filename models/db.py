@@ -40,9 +40,9 @@ def _normalize_parameters(args):
 
 
 class _LibsqlConnection:
-    """Adapteur DB-API qui synchronise chaque transaction vers libSQL."""
+    """Adapteur DB-API wrappant une connexion libSQL distante (mode Remote HTTP)."""
 
-    def __init__(self, connection, sync_enabled: bool = True):
+    def __init__(self, connection, sync_enabled: bool = False):
         object.__setattr__(self, "_connection", connection)
         object.__setattr__(self, "_sync_enabled", sync_enabled)
 
@@ -253,14 +253,18 @@ def get_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
                 "LIBSQL_URL est configuré mais libsql n'est pas installé. "
                 "Installez les dépendances de requirements.txt."
             )
+        # Mode Remote HTTP : connexion directe à Turso via l'URL libSQL.
+        # L'Embedded Replica (sync_url + db_path local) n'est PAS utilisé car
+        # Streamlit Community Cloud ne dispose pas d'un disque persistant et
+        # tenterait de télécharger l'intégralité de la base (~850 Mo) à chaque
+        # démarrage de container, provoquant un freeze systématique.
         conn = _LibsqlConnection(
             libsql.connect(
-                str(db_path),
-                sync_url=libsql_url,
+                libsql_url,
                 auth_token=libsql_token,
                 autocommit=True,
             ),
-            sync_enabled=True,
+            sync_enabled=False,
         )
     else:
         conn = sqlite3.connect(str(db_path), timeout=30.0)
@@ -301,14 +305,14 @@ def _make_read_connection(db_path: Optional[str | Path] = None) -> sqlite3.Conne
             raise RuntimeError(
                 "LIBSQL_URL est configuré mais libsql n'est pas installé."
             )
+        # Mode Remote HTTP — cf. get_connection() pour la justification.
         conn = _LibsqlConnection(
             libsql.connect(
-                str(db_path),
-                sync_url=libsql_url,
+                libsql_url,
                 auth_token=libsql_token,
                 autocommit=True,
             ),
-            sync_enabled=True,
+            sync_enabled=False,
         )
     else:
         conn = sqlite3.connect(

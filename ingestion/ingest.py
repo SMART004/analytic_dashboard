@@ -137,31 +137,28 @@ def ingest_sites(conn: sqlite3.Connection):
                         if i_col and pd.notna(r.get(i_col)):
                             sites_dict[key]["isl_terr"] = str(r.get(i_col)).strip()
 
-    cursor = conn.cursor()
-    for item in sites_dict.values():
-        cursor.execute(
-            """
-            INSERT INTO sites (site_key, sitename, zone_new, territory_correct, isl_terr, quartier, dsm_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(site_key) DO UPDATE SET
-                zone_new=COALESCE(excluded.zone_new, sites.zone_new),
-                territory_correct=COALESCE(excluded.territory_correct, sites.territory_correct),
-                isl_terr=COALESCE(excluded.isl_terr, sites.isl_terr),
-                quartier=COALESCE(excluded.quartier, sites.quartier),
-                dsm_name=COALESCE(excluded.dsm_name, sites.dsm_name)
-            """,
-            (
-                item["site_key"],
-                item["sitename"],
-                item["zone_new"],
-                item["territory_correct"],
-                item["isl_terr"],
-                item["quartier"],
-                item["dsm_name"],
-            ),
+    sql_sites = """
+        INSERT INTO sites (site_key, sitename, zone_new, territory_correct, isl_terr, quartier, dsm_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(site_key) DO UPDATE SET
+            zone_new=COALESCE(excluded.zone_new, sites.zone_new),
+            territory_correct=COALESCE(excluded.territory_correct, sites.territory_correct),
+            isl_terr=COALESCE(excluded.isl_terr, sites.isl_terr),
+            quartier=COALESCE(excluded.quartier, sites.quartier),
+            dsm_name=COALESCE(excluded.dsm_name, sites.dsm_name)
+    """
+    rows_sites = [
+        (
+            item["site_key"], item["sitename"], item["zone_new"],
+            item["territory_correct"], item["isl_terr"],
+            item["quartier"], item["dsm_name"],
         )
+        for item in sites_dict.values()
+    ]
+    cursor = conn.cursor()
+    cursor.executemany(sql_sites, rows_sites)
     conn.commit()
-    logger.info(f"Ingested {len(sites_dict)} sites into SQLite.")
+    logger.info(f"Ingested {len(rows_sites)} sites into SQLite.")
 
 
 def ingest_referentiel_pos(conn: sqlite3.Connection):
@@ -194,6 +191,26 @@ def ingest_referentiel_pos(conn: sqlite3.Connection):
         if not msisdn_col:
             continue
 
+        sql_pos = """
+            INSERT INTO referentiel_pos (
+                agent_msisdn, source_master, full_name, zone_centre,
+                zone_territoire, zone_sa, secteur_cluster, site_key,
+                segment_group, day_target, oos_target
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_msisdn, source_master) DO UPDATE SET
+                full_name=COALESCE(excluded.full_name, referentiel_pos.full_name),
+                zone_centre=COALESCE(excluded.zone_centre, referentiel_pos.zone_centre),
+                zone_territoire=COALESCE(excluded.zone_territoire, referentiel_pos.zone_territoire),
+                zone_sa=COALESCE(excluded.zone_sa, referentiel_pos.zone_sa),
+                secteur_cluster=COALESCE(excluded.secteur_cluster, referentiel_pos.secteur_cluster),
+                site_key=COALESCE(excluded.site_key, referentiel_pos.site_key),
+                segment_group=COALESCE(excluded.segment_group, referentiel_pos.segment_group),
+                day_target=COALESCE(excluded.day_target, referentiel_pos.day_target),
+                oos_target=COALESCE(excluded.oos_target, referentiel_pos.oos_target)
+        """
+        sql_site_ignore = "INSERT OR IGNORE INTO sites (site_key, sitename) VALUES (?, ?)"
+        rows_pos = []
+        rows_new_sites = []
         for _, r in df.iterrows():
             clean_num = clean_phone(r.get(msisdn_col))
             if not clean_num:
@@ -201,10 +218,7 @@ def ingest_referentiel_pos(conn: sqlite3.Connection):
 
             site_key = normalize_site_key(r.get(site_col)) if site_col else None
             if site_key and pd.notna(r.get(site_col)):
-                cursor.execute(
-                    "INSERT OR IGNORE INTO sites (site_key, sitename) VALUES (?, ?)",
-                    (site_key, str(r.get(site_col)).strip()),
-                )
+                rows_new_sites.append((site_key, str(r.get(site_col)).strip()))
 
             zone_centre = str(r.get(centre_col)).strip() if centre_col and pd.notna(r.get(centre_col)) else default_centre
             zone_terr = str(r.get(terr_col)).strip() if terr_col and pd.notna(r.get(terr_col)) else None
@@ -212,43 +226,21 @@ def ingest_referentiel_pos(conn: sqlite3.Connection):
             full_name = str(r.get(name_col)).strip() if name_col and pd.notna(r.get(name_col)) else None
             secteur = str(r.get(cluster_col)).strip() if cluster_col and pd.notna(r.get(cluster_col)) else None
             segment = str(r.get(group_col)).strip() if group_col and pd.notna(r.get(group_col)) else None
-
             day_target = pd.to_numeric(r.get(day_t_col), errors="coerce") if day_t_col else 0.0
             oos_target = pd.to_numeric(r.get(oos_t_col), errors="coerce") if oos_t_col else 0.0
 
-            cursor.execute(
-                """
-                INSERT INTO referentiel_pos (
-                    agent_msisdn, source_master, full_name, zone_centre,
-                    zone_territoire, zone_sa, secteur_cluster, site_key,
-                    segment_group, day_target, oos_target
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(agent_msisdn, source_master) DO UPDATE SET
-                    full_name=COALESCE(excluded.full_name, referentiel_pos.full_name),
-                    zone_centre=COALESCE(excluded.zone_centre, referentiel_pos.zone_centre),
-                    zone_territoire=COALESCE(excluded.zone_territoire, referentiel_pos.zone_territoire),
-                    zone_sa=COALESCE(excluded.zone_sa, referentiel_pos.zone_sa),
-                    secteur_cluster=COALESCE(excluded.secteur_cluster, referentiel_pos.secteur_cluster),
-                    site_key=COALESCE(excluded.site_key, referentiel_pos.site_key),
-                    segment_group=COALESCE(excluded.segment_group, referentiel_pos.segment_group),
-                    day_target=COALESCE(excluded.day_target, referentiel_pos.day_target),
-                    oos_target=COALESCE(excluded.oos_target, referentiel_pos.oos_target)
-                """,
-                (
-                    clean_num,
-                    folder_name,
-                    full_name,
-                    zone_centre,
-                    zone_terr,
-                    zone_sa,
-                    secteur,
-                    site_key,
-                    segment,
-                    float(day_target) if pd.notna(day_target) else 0.0,
-                    float(oos_target) if pd.notna(oos_target) else 0.0,
-                ),
-            )
-            total_inserted += 1
+            rows_pos.append((
+                clean_num, folder_name, full_name, zone_centre, zone_terr, zone_sa,
+                secteur, site_key, segment,
+                float(day_target) if pd.notna(day_target) else 0.0,
+                float(oos_target) if pd.notna(oos_target) else 0.0,
+            ))
+
+        if rows_new_sites:
+            cursor.executemany(sql_site_ignore, rows_new_sites)
+        if rows_pos:
+            cursor.executemany(sql_pos, rows_pos)
+            total_inserted += len(rows_pos)
 
     conn.commit()
     logger.info(f"Ingested {total_inserted} POS/agents into referentiel_pos.")
@@ -270,34 +262,30 @@ def ingest_referentiel_commerciaux(conn: sqlite3.Connection):
     if not msisdn_col:
         return
 
-    cursor = conn.cursor()
-    count = 0
+    sql_ccial = """
+        INSERT INTO referentiel_commerciaux (ccial_msisdn, nom_ccial, zone_centre, zone_territoire, zone_sa)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(ccial_msisdn) DO UPDATE SET
+            nom_ccial=excluded.nom_ccial,
+            zone_centre=COALESCE(excluded.zone_centre, referentiel_commerciaux.zone_centre),
+            zone_territoire=COALESCE(excluded.zone_territoire, referentiel_commerciaux.zone_territoire),
+            zone_sa=COALESCE(excluded.zone_sa, referentiel_commerciaux.zone_sa)
+    """
+    rows_ccial = []
     for _, r in df.iterrows():
         clean_num = clean_phone(r.get(msisdn_col))
         if not clean_num:
             continue
-
         nom = str(r.get(name_col)).strip() if name_col and pd.notna(r.get(name_col)) else clean_num
         centre = str(r.get(centre_col)).strip() if centre_col and pd.notna(r.get(centre_col)) else None
         terr = str(r.get(terr_col)).strip() if terr_col and pd.notna(r.get(terr_col)) else None
         sa = normalize_zone_sa(r.get(sa_col)) if sa_col else None
+        rows_ccial.append((clean_num, nom, centre, terr, sa))
 
-        cursor.execute(
-            """
-            INSERT INTO referentiel_commerciaux (ccial_msisdn, nom_ccial, zone_centre, zone_territoire, zone_sa)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(ccial_msisdn) DO UPDATE SET
-                nom_ccial=excluded.nom_ccial,
-                zone_centre=COALESCE(excluded.zone_centre, referentiel_commerciaux.zone_centre),
-                zone_territoire=COALESCE(excluded.zone_territoire, referentiel_commerciaux.zone_territoire),
-                zone_sa=COALESCE(excluded.zone_sa, referentiel_commerciaux.zone_sa)
-            """,
-            (clean_num, nom, centre, terr, sa),
-        )
-        count += 1
-
+    cursor = conn.cursor()
+    cursor.executemany(sql_ccial, rows_ccial)
     conn.commit()
-    logger.info(f"Ingested {count} commercials into referentiel_commerciaux.")
+    logger.info(f"Ingested {len(rows_ccial)} commercials into referentiel_commerciaux.")
 
 
 def ingest_exclusions(conn: sqlite3.Connection):
@@ -327,27 +315,25 @@ def ingest_exclusions(conn: sqlite3.Connection):
         if not m_col:
             continue
 
+        sql_excl = """
+            INSERT INTO exclusions_reference (msisdn, category, label, territoire, localisation)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(msisdn, category) DO UPDATE SET
+                label=COALESCE(excluded.label, exclusions_reference.label),
+                territoire=COALESCE(excluded.territoire, exclusions_reference.territoire),
+                localisation=COALESCE(excluded.localisation, exclusions_reference.localisation)
+        """
+        rows_excl = []
         for _, r in df.iterrows():
             clean_num = clean_phone(r.get(m_col))
             if not clean_num or clean_num == "None":
                 continue
-
             label = str(r.get(label_col)).strip() if label_col and pd.notna(r.get(label_col)) else None
             terr = str(r.get(terr_col)).strip() if terr_col and pd.notna(r.get(terr_col)) else None
             loc = str(r.get(loc_col)).strip() if loc_col and pd.notna(r.get(loc_col)) else None
-
-            cursor.execute(
-                """
-                INSERT INTO exclusions_reference (msisdn, category, label, territoire, localisation)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(msisdn, category) DO UPDATE SET
-                    label=COALESCE(excluded.label, exclusions_reference.label),
-                    territoire=COALESCE(excluded.territoire, exclusions_reference.territoire),
-                    localisation=COALESCE(excluded.localisation, exclusions_reference.localisation)
-                """,
-                (clean_num, category, label, terr, loc),
-            )
-            total += 1
+            rows_excl.append((clean_num, category, label, terr, loc))
+        cursor.executemany(sql_excl, rows_excl)
+        total += len(rows_excl)
 
     conn.commit()
     logger.info(f"Ingested {total} exclusions into exclusions_reference.")
@@ -378,45 +364,30 @@ def ingest_hvc_mapping(conn: sqlite3.Connection):
         return
 
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM hvc_commercial_mapping")
-    count = 0
-
+    cursor.execute("DELETE FROM hvc_commercial_mapping")    sql_ccial_ignore = "INSERT OR IGNORE INTO referentiel_commerciaux (ccial_msisdn, nom_ccial) VALUES (?, ?)"
+    sql_hvc = """
+        INSERT INTO hvc_commercial_mapping (hvc_msisdn, ccial_msisdn, ccial_en_charge)
+        VALUES (?, ?, ?)
+        ON CONFLICT(hvc_msisdn) DO UPDATE SET
+            ccial_msisdn    = excluded.ccial_msisdn,
+            ccial_en_charge = excluded.ccial_en_charge
+    """
+    rows_hvc = []
+    rows_ccial_new = []
     for _, r in df.iterrows():
         clean_hvc = clean_phone(r.get(hvc_col))
         if not clean_hvc:
             continue
-
-        nom = None
-        if name_col and pd.notna(r.get(name_col)):
-            nom = str(r.get(name_col)).strip() or None
-
-        clean_ccial = None
-        if ccial_col and pd.notna(r.get(ccial_col)):
-            clean_ccial = clean_phone(r.get(ccial_col)) or None
-
-        # On n’insère dans referentiel_commerciaux que si on a un MSISDN
+        nom = str(r.get(name_col)).strip() or None if name_col and pd.notna(r.get(name_col)) else None
+        clean_ccial = clean_phone(r.get(ccial_col)) or None if ccial_col and pd.notna(r.get(ccial_col)) else None
         if clean_ccial:
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO referentiel_commerciaux (ccial_msisdn, nom_ccial)
-                VALUES (?, ?)
-                """,
-                (clean_ccial, nom or clean_ccial),
-            )
-
-        # Insert mapping : ccial_msisdn peut être NULL
-        cursor.execute(
-            """
-            INSERT INTO hvc_commercial_mapping (hvc_msisdn, ccial_msisdn, ccial_en_charge)
-            VALUES (?, ?, ?)
-            ON CONFLICT(hvc_msisdn) DO UPDATE SET
-                ccial_msisdn    = excluded.ccial_msisdn,
-                ccial_en_charge = excluded.ccial_en_charge
-            """,
-            (clean_hvc, clean_ccial, nom),
-        )
+            rows_ccial_new.append((clean_ccial, nom or clean_ccial))
+        rows_hvc.append((clean_hvc, clean_ccial, nom))
         count += 1
 
+    if rows_ccial_new:
+        cursor.executemany(sql_ccial_ignore, rows_ccial_new)
+    cursor.executemany(sql_hvc, rows_hvc)
     conn.commit()
     logger.info(f"Ingested {count} HVC mappings (nom commercial).")
 
@@ -435,27 +406,22 @@ def ingest_cds_referentiel(conn: sqlite3.Connection):
         logger.warning("Colonnes NUM / CDS introuvables dans le paramétrage cds.")
         return
 
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM cds_referentiel")
-    count = 0
+    rows_cds = []
     for _, r in df.iterrows():
         clean_num = clean_phone(r.get(num_col))
         nom_cds = str(r.get(nom_col)).strip() if pd.notna(r.get(nom_col)) else None
         if not clean_num or not nom_cds:
             continue
+        rows_cds.append((clean_num, nom_cds))
 
-        cursor.execute(
-            """
-            INSERT INTO cds_referentiel (cds_msisdn, nom_cds)
-            VALUES (?, ?)
-            ON CONFLICT(cds_msisdn) DO UPDATE SET nom_cds=excluded.nom_cds
-            """,
-            (clean_num, nom_cds),
-        )
-        count += 1
-
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM cds_referentiel")
+    cursor.executemany(
+        "INSERT INTO cds_referentiel (cds_msisdn, nom_cds) VALUES (?, ?) ON CONFLICT(cds_msisdn) DO UPDATE SET nom_cds=excluded.nom_cds",
+        rows_cds,
+    )
     conn.commit()
-    logger.info(f"Ingested {count} entries into cds_referentiel.")
+    logger.info(f"Ingested {len(rows_cds)} entries into cds_referentiel.")
 
 
 def ingest_point_relay_referentiel(conn: sqlite3.Connection):
@@ -480,34 +446,32 @@ def ingest_point_relay_referentiel(conn: sqlite3.Connection):
         logger.warning("Colonnes MSISDN_PR / Nom du point de relais introuvables dans pos_relay_caisse.")
         return
 
-    cursor = conn.cursor()
-    count = 0
+    rows_pr = []
     for _, r in df.iterrows():
         clean_num = clean_phone(r.get(msisdn_col))
         nom = str(r.get(nom_col)).strip() if pd.notna(r.get(nom_col)) else None
         if not clean_num or not nom:
             continue
-
         territoire = str(r.get(terr_col)).strip() if terr_col and pd.notna(r.get(terr_col)) else "NON RENSEIGNE"
         localisation = str(r.get(loc_col)).strip() if loc_col and pd.notna(r.get(loc_col)) else "NON RENSEIGNE"
         type_point = "Caisses" if nom.upper().startswith("CAISSE") else "Point Relais"
+        rows_pr.append((clean_num, nom, territoire, localisation, type_point))
 
-        cursor.execute(
-            """
-            INSERT INTO point_relay_referentiel (msisdn_pr, nom, territoire, localisation, type_point)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(msisdn_pr) DO UPDATE SET
-                nom=excluded.nom,
-                territoire=excluded.territoire,
-                localisation=excluded.localisation,
-                type_point=excluded.type_point
-            """,
-            (clean_num, nom, territoire, localisation, type_point),
-        )
-        count += 1
-
+    cursor = conn.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO point_relay_referentiel (msisdn_pr, nom, territoire, localisation, type_point)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(msisdn_pr) DO UPDATE SET
+            nom=excluded.nom,
+            territoire=excluded.territoire,
+            localisation=excluded.localisation,
+            type_point=excluded.type_point
+        """,
+        rows_pr,
+    )
     conn.commit()
-    logger.info(f"Ingested {count} entries into point_relay_referentiel.")
+    logger.info(f"Ingested {len(rows_pr)} entries into point_relay_referentiel.")
 
 
 def ingest_hvc_cds_assignments(conn: sqlite3.Connection):
@@ -528,27 +492,26 @@ def ingest_hvc_cds_assignments(conn: sqlite3.Connection):
         logger.warning("Colonnes NUM_HVC / NOM_CDS introuvables dans le paramétrage hvc_cds.")
         return
 
-    cursor = conn.cursor()
-    count = 0
+    rows_hvc_cds = []
     for _, r in df.iterrows():
         clean_hvc = clean_phone(r.get(hvc_col))
         nom_cds = str(r.get(cds_col)).strip() if pd.notna(r.get(cds_col)) else None
         if not clean_hvc or not nom_cds:
             continue
+        rows_hvc_cds.append((clean_hvc, nom_cds))
 
-        cursor.execute(
-            """
-            INSERT INTO hvc_cds_assignments (hvc_msisdn, cds_nom)
-            VALUES (?, ?)
-            ON CONFLICT(hvc_msisdn) DO UPDATE SET
-                cds_nom=excluded.cds_nom
-            """,
-            (clean_hvc, nom_cds),
-        )
-        count += 1
-
+    cursor = conn.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO hvc_cds_assignments (hvc_msisdn, cds_nom)
+        VALUES (?, ?)
+        ON CONFLICT(hvc_msisdn) DO UPDATE SET
+            cds_nom=excluded.cds_nom
+        """,
+        rows_hvc_cds,
+    )
     conn.commit()
-    logger.info(f"Ingested {count} HVC->CDS assignments into hvc_cds_assignments.")
+    logger.info(f"Ingested {len(rows_hvc_cds)} HVC->CDS assignments into hvc_cds_assignments.")
 
 
 # ---------------------------------------------------------------------------

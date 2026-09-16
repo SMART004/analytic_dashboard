@@ -38,7 +38,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from ingestion.ingest import run_referentiel_ingestion
 from models.db import get_connection
 from utils.helpers import clean_phone, to_excel
 from utils.turso_storage import load_setting
@@ -118,20 +117,10 @@ def _read_database_query(query: str, conn) -> pl.DataFrame:
     return pl.read_database(query=query, connection=conn)
 
 
-def _load_database_settings(progress_callback=None) -> dict[str, pd.DataFrame]:
-    """Charge les tables canoniques et les initialise depuis Settings si vides."""
+def _load_database_settings() -> dict[str, pd.DataFrame]:
+    """Charge uniquement les tables canoniques, sans ingestion reseau implicite."""
     started_at = time.perf_counter()
     settings = _read_canonical_settings()
-    required = ("zones", "maitre_pos", "maitre_pos_III", "hvc_commercial")
-    if any(settings[name].empty for name in required):
-        try:
-            if progress_callback:
-                progress_callback(5, "Tables Turso incomplètes, synchronisation...")
-            run_referentiel_ingestion(progress_callback=progress_callback)
-            _read_canonical_settings.clear()
-            settings = _read_canonical_settings()
-        except Exception as exc:
-            st.warning(f"Initialisation des référentiels impossible : {exc}")
     st.session_state["listing_oos_database_load_seconds"] = round(
         time.perf_counter() - started_at, 2
     )
@@ -408,11 +397,7 @@ def show_pos_oos_listing():
 
     st.title("Listing POS OOS")
 
-    database_settings = _load_database_settings(
-        progress_callback=lambda value, message: progress.progress(
-            min(20, 5 + int(value * 0.15)), text=message
-        )
-    )
+    database_settings = _load_database_settings()
     finish_phase("Chargement Turso / référentiels", 20, "Référentiels chargés")
 
     phase_started_at = time.perf_counter()
