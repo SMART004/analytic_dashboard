@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
-from utils.config_storage import LOCAL_STORAGE_PATH, USE_LOCAL_STORAGE
+from utils.config_storage import LOCAL_STORAGE_PATH, USE_LOCAL_STORAGE, get_config_value
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +209,8 @@ class _NamedRow:
 def _libsql_settings() -> tuple[str | None, str | None]:
     if USE_LOCAL_STORAGE:
         return None, None
-    url = os.getenv("LIBSQL_URL") or os.getenv("TURSO_DATABASE_URL")
-    token = os.getenv("LIBSQL_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN")
+    url = get_config_value("LIBSQL_URL") or get_config_value("TURSO_DATABASE_URL")
+    token = get_config_value("LIBSQL_AUTH_TOKEN") or get_config_value("TURSO_AUTH_TOKEN")
     if not url or not token:
         raise RuntimeError(
             "USE_LOCAL_STORAGE=false exige TURSO_DATABASE_URL et TURSO_AUTH_TOKEN."
