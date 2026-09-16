@@ -36,7 +36,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
+from ingestion.ingest import run_referentiel_ingestion
+from models.db import get_connection
 from utils.helpers import clean_phone, to_excel
+from utils.turso_storage import load_setting
 
 # --------------------------------------------------------------------------
 # ⚠️ À ADAPTER si besoin : clés de session utilisées par votre page Settings
@@ -56,11 +59,95 @@ _SESSION_SETTINGS_KEYS = {
 }
 
 
+def _read_canonical_settings() -> dict[str, pd.DataFrame]:
+    """Lit les référentiels canoniques créés par run_referentiel_ingestion."""
+    conn = get_connection()
+    try:
+        zones = pd.read_sql_query(
+            """
+            SELECT site_key, sitename AS "SITENAME", zone_new AS "ZONE NEW",
+                   territory_correct AS "TERRITORY CORRECT",
+                   isl_terr AS "ISL_Terr"
+            FROM sites
+            """,
+            conn,
+        )
+        master_pos = pd.read_sql_query(
+            """
+            SELECT agent_msisdn, source_master, full_name, zone_centre AS zone,
+                   zone_territoire AS territory, secteur_cluster AS cluster,
+                   site_key, segment_group, day_target, oos_target
+            FROM referentiel_pos
+            WHERE source_master = 'maitre_pos'
+            """,
+            conn,
+        )
+        master_pos_iii = pd.read_sql_query(
+            """
+            SELECT agent_msisdn, source_master, full_name, zone_centre AS zone,
+                   zone_territoire AS territory, secteur_cluster AS cluster,
+                   site_key, segment_group, day_target, oos_target
+            FROM referentiel_pos
+            WHERE source_master = 'maitre_pos_III'
+            """,
+            conn,
+        )
+        hvc_commercial = pd.read_sql_query(
+            """
+            SELECT hvc_msisdn AS HVC_MSISDN,
+                   ccial_en_charge AS "Ccial en charge"
+            FROM hvc_commercial_mapping
+            """,
+            conn,
+        )
+        return {
+            "zones": zones,
+            "maitre_pos": master_pos,
+            "maitre_pos_III": master_pos_iii,
+            "hvc_commercial": hvc_commercial,
+        }
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_database_settings() -> dict[str, pd.DataFrame]:
+    """Charge les tables canoniques et les initialise depuis Settings si vides."""
+    settings = _read_canonical_settings()
+    required = ("zones", "maitre_pos", "maitre_pos_III", "hvc_commercial")
+    if any(settings[name].empty for name in required):
+        try:
+            run_referentiel_ingestion()
+            settings = _read_canonical_settings()
+        except Exception as exc:
+            st.warning(f"Initialisation des référentiels impossible : {exc}")
+    return settings
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_persisted_setting(folder_name: str) -> Optional[pd.DataFrame]:
+    """Dernier repli : charge le fichier persistant depuis stored_files."""
+    return load_setting(folder_name)
+
+
 def _load_session_setting(folder_name: str) -> Optional[pd.DataFrame]:
-    """Charge uniquement les référentiels déjà présents dans la session."""
+    """Priorise les tables Turso, puis session et fichier Settings en repli."""
     key = _SESSION_SETTINGS_KEYS.get(folder_name, folder_name)
+
+    database_value = _load_database_settings().get(folder_name)
+    if isinstance(database_value, pd.DataFrame) and not database_value.empty:
+        st.session_state[key] = database_value
+        return database_value
+
     value = st.session_state.get(key)
-    return value if isinstance(value, pd.DataFrame) else None
+    if isinstance(value, pd.DataFrame):
+        return value
+
+    value = _load_persisted_setting(folder_name)
+    if isinstance(value, pd.DataFrame):
+        st.session_state[key] = value
+        return value
+    return None
 
 REQUIRED_COLS = [
     "Day_Target", "Float", "OOS", "Last Trx Time",
