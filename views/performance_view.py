@@ -70,7 +70,7 @@ _SEGMENT_LABELS = {
     "cds": "CDS",
 }
 
-_CDS_DISPLAY_ONLY_COLUMNS = ["FD_Commercial", "Ccial_Serve"]
+_CDS_DISPLAY_ONLY_COLUMNS = []
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ def render_performance(context: PerformanceContext) -> None:
 
     display_with_total = _append_total_row(display_df, context.segment)
 
-    st.dataframe(display_with_total, use_container_width=True, hide_index=True, height=600)
+    st.dataframe(_style_persistence(display_with_total), use_container_width=True, hide_index=True, height=600)
 
     # Top 10 : commercial + pr_caisse uniquement (context.top_commerciaux est
     # vide pour cds par construction, jamais calculé côté controller).
@@ -317,18 +317,19 @@ def _build_commercial_display(table: pd.DataFrame) -> pd.DataFrame:
         "Commercial": _col(df, "Actor_Nom", ""),
         "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
         "Heure_Dotation": df["Heure_Dotation"],
-        "Dotation_Montant": _to_num(_col(df, "Dotation_Montant", 0)),
+        "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
         "Premiere_Trans": df["Premiere_Trans"],
         "Derniere_Trans": df["Derniere_Trans"],
         "Nb_Transactions": _to_int(_col(df, "Nb_Transactions", 0)),
-        "FD_HVC": _to_num(_col(df, "FD_HVC", 0)),
+        "FD_HVC": _to_int(_col(df, "FD_HVC", 0)),
         "HVC_Serve": _to_int(_col(df, "HVC_Serve", 0)),
         "TR_HVC (%)": _to_num(_col(df, "TR_HVC", 0)),
-        "FD_Others": _to_num(_col(df, "FD_Others", 0)),
+        "FD_Others": _to_int(_col(df, "FD_Others", 0)),
         "Other_Serve": _to_int(_col(df, "Other_Serve", 0)),
         "TR_Other (%)": _to_num(_col(df, "TR_Other", 0)),
-        "Sigma_FD": _to_num(_col(df, "Sigma_FD", 0)),
-        "Sigma_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
+        "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
         "TR_General (%)": _to_num(_col(df, "TR_General", 0)),
     })
 
@@ -353,28 +354,21 @@ def _build_pr_caisse_display(table: pd.DataFrame, type_point: str = "Tous") -> p
         "Nom": _col(df, "Actor_Nom", ""),
         "Type": _col(df, "Type_Point", ""),
         "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
-        "FD_HVC": _to_num(_col(df, "FD_HVC", 0)),
+        "FD_HVC": _to_int(_col(df, "FD_HVC", 0)),
         "HVC_Serve": _to_int(_col(df, "HVC_Serve", 0)),
-        "FD_Others": _to_num(_col(df, "FD_Others", 0)),
+        "FD_Others": _to_int(_col(df, "FD_Others", 0)),
         "Other_Serve": _to_int(_col(df, "Other_Serve", 0)),
-        "Sigma_FD": _to_num(_col(df, "Sigma_FD", 0)),
-        "Sigma_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
-        "POS_serve [14h-17h]": _to_int(_col(df, "POS_serve", 0)),
-        "Nouveaux [14h-17h]": _to_int(_col(df, "New", 0)),
+        "Hors_Portefeuille_POS": _to_int(_col(df, "Hors_Portefeuille_POS", 0)),
+        "FD_Hors_Portefeuille": _to_int(_col(df, "FD_Hors_Portefeuille", 0)),
+        "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
+        "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        "POS_Touches": _to_int(_col(df, "POS_Touches", 0)),
+        "POS_Attribues": _to_int(_col(df, "POS_Attribues", 0)),
+        "Taux_Couverture (%)": _to_num(_col(df, "Taux_Couverture", 0)),
+        "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
         "Dotation_Nom": _col(df, "Dotation_Nom", ""),
-        "Dotation_Montant": _to_num(_col(df, "Dotation_Montant", 0)),
+        "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
     })
-
-    # Work Progress (3 fenetres, Serve uniquement, sans TR — decision actee).
-    # Renseigne uniquement pour les lignes "Caisses" (le controller ne le
-    # calcule que sur Type_Point == "Caisses") ; "0 | 0" pour Point Relais.
-    for label in WORK_PROGRESS_LABELS:
-        serve_col = f"HVC Serve {label}"
-        other_serve_col = f"Other Serve {label}"
-        display[f"TPW {label}"] = (
-            "HVC:" + _to_int(_col(df, serve_col, 0)).astype(str)
-            + " | Other:" + _to_int(_col(df, other_serve_col, 0)).astype(str)
-        )
 
     if type_point == "Caisses" or (not df.empty and "Type_Point" in df.columns and (df["Type_Point"] == "Caisses").all()):
         display = display.drop(columns=["Dotation_Nom", "Dotation_Montant"], errors="ignore")
@@ -390,16 +384,21 @@ def _build_cds_display(table: pd.DataFrame) -> pd.DataFrame:
     display = pd.DataFrame({
         "CDS": _col(df, "Actor_Nom", ""),
         "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
-        "FD_HVC": _to_num(_col(df, "FD_HVC", 0)),
+        "FD_HVC": _to_int(_col(df, "FD_HVC", 0)),
         "HVC_Serve": _to_int(_col(df, "HVC_Serve", 0)),
-        "FD_Commercial": _to_num(_col(df, "FD_Commercial", 0)),
+        "Hors_Portefeuille_HVC_POS": _to_int(_col(df, "Hors_Portefeuille_POS", 0)),
+        "FD_Hors_Portefeuille_HVC": _to_int(_col(df, "FD_Hors_Portefeuille", 0)),
+        "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
+        "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        "FD_Commercial": _to_int(_col(df, "FD_Commercial", 0)),
         "Ccial_Serve": _to_int(_col(df, "Ccial_Serve", 0)),
+        "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
         "Nb_HVC_Attribue": _to_int(_col(df, "nb_hvc_attribue", 0)),
         "Taux_Couverture_Quota": quota_str,
         # POS_serve/Nouveaux [14h-17h] retires : plus calcules pour CDS
         # cote controller (Bloquant 1), les afficher serait trompeur (0 partout).
         "Dotation_Nom": _col(df, "Dotation_Nom", ""),
-        "Dotation_Montant": _to_num(_col(df, "Dotation_Montant", 0)),
+        "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
     })
     return display.sort_values(["CDS"]).reset_index(drop=True)
 
@@ -407,6 +406,14 @@ def _build_cds_display(table: pd.DataFrame) -> pd.DataFrame:
 def _prepare_export_df(df: pd.DataFrame, segment: str) -> pd.DataFrame:
     if segment == "cds":
         return df.drop(columns=_CDS_DISPLAY_ONLY_COLUMNS, errors="ignore")
+    if segment == "pr_caisse":
+        non_total = df[~df.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+        if not non_total.empty and "Type" in non_total.columns and (non_total["Type"] == "Caisses").all():
+            cols_to_drop = [
+                "POS_Touches", "POS_Attribues", "Taux_Couverture (%)", "Taux_Persistance (%)",
+                "Hors_Portefeuille_POS", "FD_Hors_Portefeuille"
+            ]
+            return df.drop(columns=cols_to_drop, errors="ignore")
     return df
 
 
@@ -416,7 +423,7 @@ def _build_top10_display(context: PerformanceContext) -> pd.DataFrame:
     display = df[cols].rename(columns={
         "Actor_Nom": "Nom",
         "TR_General": "TR_General (%)",
-        "Sigma_FD": "Sigma_FD (montant)",
+        "Sigma_FD": "Σ_FD (montant)",
     })
     display.insert(0, "Rang", range(1, len(display) + 1))
     return display
@@ -435,7 +442,16 @@ def _append_total_row(display_df: pd.DataFrame, segment: str) -> pd.DataFrame:
     total[label_col] = "TOTAL"
 
     for col in display_df.select_dtypes(include="number").columns:
+        if col == "Taux_Persistance (%)":
+            total[col] = None
+            continue
         total[col] = display_df[col].sum()
+
+    if "Taux_Couverture (%)" in total and "POS_Attribues" in total:
+        total["Taux_Couverture (%)"] = (
+            round(total["POS_Touches"] / total["POS_Attribues"] * 100, 1)
+            if total["POS_Attribues"] else None
+        )
 
     if segment == "cds" and "HVC_Serve" in total and "Nb_HVC_Attribue" in total:
         total_serve, total_quota = total["HVC_Serve"], total["Nb_HVC_Attribue"]
@@ -512,7 +528,7 @@ def _commercial_styles() -> dict[str, Any]:
             "Dotation_Montant": "#,##0",
             "FD_HVC": "#,##0",
             "FD_Others": "#,##0",
-            "Sigma_FD": "#,##0",
+            "Σ_FD": "#,##0",
         },
         "rules": [
             _heure_debut_rule,
@@ -520,9 +536,9 @@ def _commercial_styles() -> dict[str, Any]:
             {"columns": ["TR_HVC (%)", "TR_Other (%)", "TR_General (%)"], "op": "<", "value": 70, "style": {"fill": "#ffd6d6"}},
             {"columns": ["TR_HVC (%)", "TR_Other (%)", "TR_General (%)"], "op": "between", "value": (70, 99.999), "style": {"fill": "#fff3bf"}},
             {"columns": ["TR_HVC (%)", "TR_Other (%)", "TR_General (%)"], "op": ">=", "value": 100, "style": {"fill": "#d8f3dc"}},
-            {"columns": ["Sigma_POS_Serve"], "op": "<", "value": 20, "style": {"fill": "#ffd6d6"}},
-            {"columns": ["Sigma_POS_Serve"], "op": "between", "value": (20, 39), "style": {"fill": "#fff3bf"}},
-            {"columns": ["Sigma_POS_Serve"], "op": ">=", "value": 40, "style": {"fill": "#d8f3dc"}},
+            {"columns": ["Σ_POS_Serve"], "op": "<", "value": 20, "style": {"fill": "#ffd6d6"}},
+            {"columns": ["Σ_POS_Serve"], "op": "between", "value": (20, 39), "style": {"fill": "#fff3bf"}},
+            {"columns": ["Σ_POS_Serve"], "op": ">=", "value": 40, "style": {"fill": "#d8f3dc"}},
         ],
     }
 
@@ -531,11 +547,11 @@ def _pr_caisse_styles() -> dict[str, Any]:
     return {
         "sheet_name": "Performance PR & Caisses",
         "total_row_match": _total_row_match,
-        "row_styles": _inactive_row_style("Sigma_POS_Serve"),
+        "row_styles": _inactive_row_style("Σ_POS_Serve"),
         "formats": {
             "FD_HVC": "#,##0",
             "FD_Others": "#,##0",
-            "Sigma_FD": "#,##0",
+            "Σ_FD": "#,##0",
             "Dotation_Montant": "#,##0",
         },
     }
@@ -548,9 +564,45 @@ def _cds_styles() -> dict[str, Any]:
         "row_styles": _inactive_row_style("HVC_Serve"),
         "formats": {
             "FD_HVC": "#,##0",
+            "FD_Hors_Portefeuille_HVC": "#,##0",
+            "Σ_FD": "#,##0",
             "Dotation_Montant": "#,##0",
         },
     }
+
+
+def _style_persistence(df: pd.DataFrame):
+    """Colorise la persistance: vert >=70, jaune 40-69, rouge <40."""
+    column = "Taux_Persistance (%)"
+    if column not in df.columns:
+        return df
+
+    def color(value: Any) -> str:
+        if pd.isna(value) or value == "" or value == "N/A":
+            return ""
+        try:
+            val = float(value)
+        except (ValueError, TypeError):
+            return ""
+            
+        if val >= 70:
+            return "background-color: #d8f3dc; color: #1b4332;"
+        if val >= 40:
+            return "background-color: #fff3bf; color: #5f4700;"
+        return "background-color: #ffd6d6; color: #7f1d1d;"
+
+    def format_pct(value: Any) -> str:
+        if pd.isna(value) or value == "" or value == "N/A":
+            return ""
+        try:
+            return f"{float(value):.1f}%"
+        except (ValueError, TypeError):
+            return str(value)
+
+    # Use map if pandas version allows, otherwise applymap
+    if hasattr(df.style, 'map'):
+        return df.style.map(color, subset=[column]).format({column: format_pct})
+    return df.style.applymap(color, subset=[column]).format({column: format_pct})
 
 
 # ---------------------------------------------------------------------------

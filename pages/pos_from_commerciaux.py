@@ -259,6 +259,14 @@ def show_pos_from_commerciaux():
         key="pos_from_commerciaux_files",
     )
 
+    target_pos_file = st.file_uploader(
+        "Upload fichier des POS à attribuer (Optionnel)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=False,
+        key="target_pos_file",
+        help="Si fourni, limite l'attribution uniquement aux numéros de POS présents dans ce fichier."
+    )
+
     if not trans_files:
         st.info("Veuillez uploader les fichiers de transactions.")
         st.stop()
@@ -277,6 +285,30 @@ def show_pos_from_commerciaux():
 
         trans_df["From_clean"] = trans_df["From"].apply(clean_phone)
         trans_df["To_clean"] = trans_df["To"].apply(clean_phone)
+
+        if target_pos_file:
+            try:
+                if target_pos_file.name.lower().endswith(".csv"):
+                    target_df = pd.read_csv(target_pos_file)
+                else:
+                    target_df = pd.read_excel(target_pos_file)
+                
+                target_col = _first_existing_case_insensitive(
+                    target_df.columns,
+                    ["MSISDN", "Numero", "Number", "POS", "Agent MSISDN", "Agent_MSISDN", "POS_MSISDN", "To"]
+                )
+                if not target_col:
+                    target_col = target_df.columns[0]
+                
+                target_pos_set = set(target_df[target_col].apply(clean_phone).dropna().unique())
+                
+                if target_pos_set:
+                    trans_df = trans_df[trans_df["To_clean"].isin(target_pos_set)]
+                    st.success(f"Attribution limitée à {len(target_pos_set)} POS valides trouvés dans le fichier cible.")
+                else:
+                    st.warning("Aucun numéro valide trouvé dans le fichier des POS à attribuer.")
+            except Exception as e:
+                st.error(f"Erreur lors de la lecture du fichier cible: {e}")
 
         if "Date" in trans_df.columns:
             trans_df["Date"] = pd.to_datetime(trans_df["Date"], errors="coerce")

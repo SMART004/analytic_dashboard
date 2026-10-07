@@ -150,6 +150,16 @@ CREATE TABLE IF NOT EXISTS point_relay_referentiel (
     type_point TEXT NOT NULL CHECK (type_point IN ('Point Relais', 'Caisses'))
 );
 
+-- 12. MAPPING POINT RELAIS -> POS ATTRIBUES
+CREATE TABLE IF NOT EXISTS pos_point_relais (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    point_de_proximite TEXT,
+    numero_du_point TEXT,
+    numero_pos TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(numero_du_point, numero_pos)
+);
+
 -- INDEX
 CREATE INDEX IF NOT EXISTS idx_tx_date_only ON transactions(date_only);
 CREATE INDEX IF NOT EXISTS idx_tx_hour ON transactions(hour);
@@ -167,3 +177,5 @@ CREATE INDEX IF NOT EXISTS idx_hvc_site_key ON hvc_variations(site_key);
 CREATE INDEX IF NOT EXISTS idx_hvc_cds_nom ON hvc_cds_assignments(cds_nom);
 CREATE INDEX IF NOT EXISTS idx_pr_territoire ON point_relay_referentiel(territoire);
 CREATE INDEX IF NOT EXISTS idx_pr_type_point ON point_relay_referentiel(type_point);
+CREATE INDEX IF NOT EXISTS idx_pos_point_relais_numero_point ON pos_point_relais(numero_du_point);
+CREATE INDEX IF NOT EXISTS idx_pos_point_relais_numero_pos ON pos_point_relais(numero_pos);

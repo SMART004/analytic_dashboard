@@ -840,6 +840,8 @@ def _render_commercial_portfolio(context: ConqueteContext) -> None:
     group_cols = ["Commercial", "Commercial_MSISDN", "To_clean"]
     if "Segment_PDV" in df_tx.columns:
         group_cols.append("Segment_PDV")
+    if "Zone_SA_Comm" in df_tx.columns:
+        group_cols.append("Zone_SA_Comm")
 
     agg = {"tx_count": ("To_clean", "size")}
     if "Amount" in df_tx.columns:
@@ -927,12 +929,23 @@ def _render_commercial_portfolio(context: ConqueteContext) -> None:
 
     # Tableau enrichi
     st.markdown("#### Portefeuille détaillé")
+    
+    if "Zone_SA" in enriched.columns:
+        zones_disponibles = sorted([z for z in enriched["Zone_SA"].unique() if pd.notna(z) and str(z).strip() != ""])
+        if zones_disponibles:
+            filtre_zones = st.multiselect("Filtrer par Zone SA", options=zones_disponibles, default=[])
+            if filtre_zones:
+                enriched = enriched[enriched["Zone_SA"].isin(filtre_zones)]
+
     disp = enriched.rename(columns={
+        "Zone_SA": "Zone SA",
         "MSISDN": "MSISDN",
         "POS_attribues": "POS attribués",
         "POS_servis": "POS servis",
         "Capilarite_pct": "Capilarité %",
         "Taux_couverture_pct": "Taux couverture %",
+        "Taux_couverture_HVC_pct": "Taux couverture HVC %",
+        "Taux_couverture_Autres_pct": "Taux couverture Autres %",
         "Montant_descendu": "Montant descendu",
         "POS_servis_hors_portefeuille": "POS servis (Hors Portefeuille)",
         "Montant_descendu_hors_portefeuille": "Montant descendu (Hors Portefeuille)",
@@ -962,6 +975,20 @@ def _render_commercial_portfolio(context: ConqueteContext) -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+    # === ANALYSE OOS HVC ===
+    try:
+        from controllers.oos_hvc_plugin import build_oos_hvc_analysis
+        st.markdown("#### % OOS HVC (Sévérité) par Commercial et Site")
+        st.caption("Calcul V2 : (Total jours OOS / Jours observés) * 100 avec interpolation des week-ends via last_trx_time et résolution par les transactions.")
+        oos_df = build_oos_hvc_analysis(assigned, df_tx, context.filters.start_date, context.filters.end_date)
+        if not oos_df.empty:
+            st.dataframe(oos_df, use_container_width=True, hide_index=True)
+            _render_exports("conquete_oos_hvc_severite", oos_df, {})
+        else:
+            st.info("Données OOS HVC insuffisantes ou inexistantes pour la période.")
+    except Exception as e:
+        pass
 
 
 # def _build_monthly_portfolio_comparison(assigned: pd.DataFrame, tx: pd.DataFrame) -> pd.DataFrame:

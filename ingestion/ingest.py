@@ -364,7 +364,8 @@ def ingest_hvc_mapping(conn: sqlite3.Connection):
         return
 
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM hvc_commercial_mapping")    sql_ccial_ignore = "INSERT OR IGNORE INTO referentiel_commerciaux (ccial_msisdn, nom_ccial) VALUES (?, ?)"
+    cursor.execute("DELETE FROM hvc_commercial_mapping")
+    sql_ccial_ignore = "INSERT OR IGNORE INTO referentiel_commerciaux (ccial_msisdn, nom_ccial) VALUES (?, ?)"
     sql_hvc = """
         INSERT INTO hvc_commercial_mapping (hvc_msisdn, ccial_msisdn, ccial_en_charge)
         VALUES (?, ?, ?)
@@ -374,6 +375,7 @@ def ingest_hvc_mapping(conn: sqlite3.Connection):
     """
     rows_hvc = []
     rows_ccial_new = []
+    count = 0
     for _, r in df.iterrows():
         clean_hvc = clean_phone(r.get(hvc_col))
         if not clean_hvc:
@@ -458,6 +460,7 @@ def ingest_point_relay_referentiel(conn: sqlite3.Connection):
         rows_pr.append((clean_num, nom, territoire, localisation, type_point))
 
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM point_relay_referentiel")
     cursor.executemany(
         """
         INSERT INTO point_relay_referentiel (msisdn_pr, nom, territoire, localisation, type_point)
@@ -472,6 +475,80 @@ def ingest_point_relay_referentiel(conn: sqlite3.Connection):
     )
     conn.commit()
     logger.info(f"Ingested {len(rows_pr)} entries into point_relay_referentiel.")
+
+
+def ingest_pos_point_relais(conn: sqlite3.Connection):
+    """Synchronise le mapping PR/POS en conservant un POS non attribue a 0."""
+    df = load_setting("pos_point_relais")
+    if df is None or df.empty:
+        return
+
+    frame = pl.from_pandas(df)
+    frame = frame.rename({column: str(column).strip() for column in frame.columns})
+
+    def pick(candidates: list[str]) -> str | None:
+        normalized = {_normalize_col_name(column): column for column in frame.columns}
+        for candidate in candidates:
+            found = normalized.get(_normalize_col_name(candidate))
+            if found:
+                return found
+        return None
+
+    point_name_col = pick(["point_de_proximite", "point de proximite", "point de proximité", "Nom PR", "Nom"])
+    point_num_col = pick(["numero_du_point", "numero du point", "numéro du point", "NUMERO_PR", "MSISDN_PR"])
+    pos_num_col = pick(["numero_pos", "numero pos", "numéro POS", "POS", "MSISDN_POS"])
+    if not point_num_col:
+        logger.warning("Colonne numero_du_point introuvable dans pos_point_relais.")
+        return
+
+    frame = frame.with_columns([
+        (pl.col(point_name_col).cast(pl.Utf8, strict=False).fill_null("").str.strip_chars()
+         if point_name_col else pl.lit("")).alias("point_de_proximite"),
+        pl.col(point_num_col).map_elements(clean_phone, return_dtype=pl.Utf8).fill_null("").alias("numero_du_point"),
+        (pl.col(pos_num_col).map_elements(clean_phone, return_dtype=pl.Utf8).fill_null("0")
+         if pos_num_col else pl.lit("0")).alias("numero_pos"),
+    ]).select(["point_de_proximite", "numero_du_point", "numero_pos"])
+
+    valid_pos = pl.read_database("SELECT DISTINCT agent_msisdn FROM referentiel_pos", conn)
+    if not valid_pos.is_empty():
+        valid_pos = valid_pos.with_columns(pl.col("agent_msisdn").cast(pl.Utf8, strict=False))
+        frame = frame.join(
+            valid_pos.with_columns(pl.lit(True).alias("pos_exists")),
+            left_on="numero_pos", right_on="agent_msisdn", how="left"
+        )
+        
+        # Identifier les POS absents du référentiel (hors ligne vide/0)
+        missing_pos = frame.filter(
+            pl.col("pos_exists").is_null() & (pl.col("numero_pos") != "") & (pl.col("numero_pos") != "0")
+        )
+        if not missing_pos.is_empty():
+            unknown_pos_list = missing_pos.select("numero_pos").unique().to_series().to_list()
+            rows_to_insert = [
+                (pos, "mapping_pr_auto", f"POS_{pos}", "Inconnu", "Inconnu", "Inconnu", "Inconnu", None, "LVC", 0.0, 0.0)
+                for pos in unknown_pos_list
+            ]
+            conn.executemany("""
+                INSERT OR IGNORE INTO referentiel_pos (
+                    agent_msisdn, source_master, full_name, zone_centre,
+                    zone_territoire, zone_sa, secteur_cluster, site_key,
+                    segment_group, day_target, oos_target
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows_to_insert)
+            logger.info("Inserted %s unknown POS from PR mapping as default LVC.", len(rows_to_insert))
+
+        # On ne force plus numero_pos à 0 s'il n'existait pas, on le garde.
+        frame = frame.with_columns(
+            pl.when(pl.col("numero_pos") == "").then(pl.lit("0")).otherwise(pl.col("numero_pos")).alias("numero_pos")
+        ).drop("pos_exists")
+
+    rows = list(frame.filter(pl.col("numero_du_point") != "").unique(subset=["numero_du_point", "numero_pos"]).iter_rows())
+    conn.execute("DELETE FROM pos_point_relais")
+    conn.executemany(
+        "INSERT INTO pos_point_relais (point_de_proximite, numero_du_point, numero_pos) VALUES (?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    logger.info("Ingested %s mappings into pos_point_relais.", len(rows))
 
 
 def ingest_hvc_cds_assignments(conn: sqlite3.Connection):
@@ -905,6 +982,7 @@ def run_referentiel_ingestion(
         ingest_exclusions(conn)
         ingest_cds_referentiel(conn)
         ingest_point_relay_referentiel(conn)
+        ingest_pos_point_relais(conn)
         migrate_hvc_commercial_mapping(conn)
         ingest_hvc_mapping(conn)
         ingest_hvc_cds_assignments(conn)
@@ -922,6 +1000,7 @@ def run_referentiel_ingestion(
         ("exclusions_reference", ingest_exclusions),
         ("cds_referentiel", ingest_cds_referentiel),
         ("point_relay_referentiel", ingest_point_relay_referentiel),
+        ("pos_point_relais", ingest_pos_point_relais),
         ("hvc_commercial_mapping", migrate_hvc_commercial_mapping),
         ("hvc_commercial_mapping_data", ingest_hvc_mapping),
         ("hvc_cds_assignments", ingest_hvc_cds_assignments),
@@ -984,6 +1063,7 @@ def _referentiel_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "exclusions_reference": conn.execute("SELECT COUNT(*) FROM exclusions_reference").fetchone()[0],
         "cds_referentiel": conn.execute("SELECT COUNT(*) FROM cds_referentiel").fetchone()[0],
         "point_relay_referentiel": conn.execute("SELECT COUNT(*) FROM point_relay_referentiel").fetchone()[0],
+        "pos_point_relais": conn.execute("SELECT COUNT(*) FROM pos_point_relais").fetchone()[0],
         "hvc_commercial_mapping": conn.execute("SELECT COUNT(*) FROM hvc_commercial_mapping").fetchone()[0],
         "hvc_cds_assignments": conn.execute("SELECT COUNT(*) FROM hvc_cds_assignments").fetchone()[0],
     }

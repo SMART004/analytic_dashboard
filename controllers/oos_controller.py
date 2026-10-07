@@ -848,7 +848,7 @@ def build_hvc_frequently_oos(filters: OosHvcFilters, min_snapshots: int = 2) -> 
         lf = lf.filter(pl.col("segment_group").cast(pl.Utf8).str.to_uppercase().str.contains("HVC"))
 
     res = lf.group_by("msisdn").agg([
-        pl.col("snapshot_date").n_unique().alias("nb_snapshots_oos"),
+        pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("nb_snapshots_oos"),
         pl.col("oos_pct").cast(pl.Float64, strict=False).mean().round(1).alias("pct_oos_moy"),
         pl.col("snapshot_date").max().alias("last_snapshot_date"),
         pl.col("territory").first(),
@@ -1311,7 +1311,8 @@ def compute_pos_status(
 @st.cache_data(ttl=120, show_spinner=False)  # 2 minutes
 def compute_frequently_oos_metrics(
     df_full: pd.DataFrame,
-    behavior_filter: str = "Tous"
+    behavior_filter: str = "Tous",
+    hour_filter: Optional[int] = None
 ) -> pd.DataFrame:
     """Calcul des métriques avancées pour le tableau POS Fréquemment en OOS avec Polars."""
     if df_full.empty or "msisdn" not in df_full.columns or "snapshot_date" not in df_full.columns:
@@ -1320,6 +1321,16 @@ def compute_frequently_oos_metrics(
             "Nombre d'apparitions (Jour)", "%OOS Moyen", "Durée Moyenne OOS (Heures)",
             "Float Moyen OOS", "Statut"
         ])
+
+    if hour_filter is not None:
+        ts_col = pd.to_datetime(df_full["snapshot_date"], errors="coerce")
+        df_full = df_full[ts_col.dt.hour == hour_filter]
+        if df_full.empty:
+            return pd.DataFrame(columns=[
+                "Nom POS", "Numéro POS", "Site", "Zone_SA", "Commercial Attribué",
+                "Nombre d'apparitions (Jour)", "%OOS Moyen", "Durée Moyenne OOS (Heures)",
+                "Float Moyen OOS", "Statut"
+            ])
 
     lf = pl.from_pandas(df_full).lazy()
 
@@ -1336,14 +1347,19 @@ def compute_frequently_oos_metrics(
 
     site_expr = pl.col("sitename").first().alias("site") if "sitename" in df_full.columns else pl.col("site").first().alias("site") if "site" in df_full.columns else pl.lit("N/A").alias("site")
     zone_sa_expr = pl.col("zone_sa").first() if "zone_sa" in df_full.columns else pl.lit("N/A").alias("zone_sa")
+    cluster_expr = pl.col("cluster").first() if "cluster" in df_full.columns else pl.lit("N/A").alias("cluster")
+    territory_expr = pl.col("territory").first() if "territory" in df_full.columns else pl.lit("N/A").alias("territory")
     comm_expr = pl.col("commercial").first() if "commercial" in df_full.columns else pl.lit("Non attribué").alias("commercial")
 
     pos_daily = lf.group_by(["msisdn", "_day"]).agg([
         pl.col("full_name").first(),
         site_expr,
         zone_sa_expr,
+        cluster_expr,
+        territory_expr,
         comm_expr,
-        pl.len().alias("appearances"),
+        pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("appearances"),
+        pl.len().alias("raw_appearances"),
         pl.col("_ts").min().alias("min_ts"),
         pl.col("_ts").max().alias("max_ts"),
         pl.col("float_amount").sum().alias("float_sum"),
@@ -1351,7 +1367,7 @@ def compute_frequently_oos_metrics(
         pl.col("snapshot_date").max().alias("last_snap"),
         pl.col("total_day_snaps").first().alias("total_day_snaps"),
     ]).with_columns([
-        (pl.col("appearances") / pl.col("total_day_snaps").replace(0, 1) * 100.0).alias("daily_oos_pct"),
+        (pl.col("raw_appearances") / pl.col("total_day_snaps").replace(0, 1) * 100.0).alias("daily_oos_pct"),
         ((pl.col("max_ts") - pl.col("min_ts")).dt.total_seconds() / 3600.0).fill_null(0.0).alias("daily_duration_hours")
     ])
 
@@ -1360,20 +1376,25 @@ def compute_frequently_oos_metrics(
     latest_snap_dt = all_snaps[-1] if all_snaps else None
     oos_pairs = set(zip(df_full["msisdn"].astype(str).str.strip(), df_full["snapshot_date"]))
 
+    true_apps = lf.group_by("msisdn").agg([
+        pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("total_apparitions")
+    ])
+
     pos_summary = pos_daily.group_by("msisdn").agg([
         pl.col("full_name").first(),
         pl.col("site").first(),
         pl.col("zone_sa").first(),
+        pl.col("cluster").first(),
+        pl.col("territory").first(),
         pl.col("commercial").first(),
         pl.col("_day").n_unique().alias("nb_jours_oos"),
-        pl.col("appearances").sum().alias("total_apparitions"),
         pl.col("appearances").mean().alias("avg_apparitions_jour"),
         pl.col("daily_oos_pct").mean().alias("pct_oos_moyen"),
         pl.col("daily_duration_hours").mean().alias("duree_moyenne_heures"),
         pl.col("float_sum").sum().alias("total_float_sum"),
         pl.col("float_count").sum().alias("total_float_count"),
         pl.col("last_snap").max().alias("last_snap"),
-    ]).with_columns(
+    ]).join(true_apps, on="msisdn", how="left").with_columns(
         pl.when(pl.col("total_float_count") > 0)
         .then(pl.col("total_float_sum") / pl.col("total_float_count"))
         .otherwise(0.0)
@@ -1438,8 +1459,12 @@ def compute_frequently_oos_metrics(
         "Numéro POS": res["msisdn"],
         "Site": res["site"],
         "Zone_SA": res["zone_sa"].fillna("N/A"),
+        "Cluster": res["cluster"].fillna("N/A"),
+        "Territory": res["territory"].fillna("N/A"),
         "Commercial Attribué": res["commercial"],
-        "Nombre d'apparitions (Jour)": res["avg_apparitions_jour_int"],
+        "Jours en OOS": res["nb_jours_oos"],
+        "Total Apparitions": res["total_apparitions"],
+        "Apparitions / Jour": res["avg_apparitions_jour_int"],
         "%OOS Moyen": res["pct_oos_moyen_int"],
         "Durée Moyenne OOS (Heures)": res["Durée Moyenne OOS (Heures)"],
         "Float Moyen OOS": res["float_moyen_oos_int"],
@@ -1481,7 +1506,7 @@ def enrich_oos_with_history(df: pd.DataFrame, filters: Optional[OosHvcFilters] =
             )
 
             grp = all_lf.group_by("msisdn").agg([
-                pl.len().alias("rupture_count"),
+                pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("rupture_count"),
                 pl.col("_day").n_unique().alias("nb_days"),
                 pl.col("snapshot_date").max().alias("last_snap")
             ]).join(pos_avg_daily, on="msisdn", how="left").with_columns(

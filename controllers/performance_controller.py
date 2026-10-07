@@ -80,12 +80,21 @@ from models.performance_model import (
     get_dotation_transactions,
     get_hvc_msisdns,
     get_hvc_quota_by_cds,
+    get_hvc_cds_assignments,
     get_mvc_lvc_msisdns,
     get_performance_filter_options,
     get_performance_transactions,
     get_point_relay_referentiel,
 )
 from models.reference_model import get_exclusions
+from models.db import get_connection
+from utils.helpers import clean_phone
+from models.performance_polars import compute_coverage_persistence
+from models.performance_polars import (
+    compute_daily_activity_polars,
+    compute_hvc_others_polars,
+    compute_pr_portfolio_metrics,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration par segment
@@ -174,6 +183,14 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
         table = actor_pool.copy()
         for col in base_cols:
             table[col] = 0
+        table = table.merge(
+            compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date),
+            on="Actor_MSISDN", how="left",
+        )
+        if segment == "pr_caisse" and "Type_Point" in table.columns:
+            caisse_rows = table["Type_Point"].eq("Caisses")
+            table.loc[caisse_rows, ["POS_Touches", "POS_Attribues", "Taux_Couverture"]] = 0
+            table.loc[caisse_rows, "Taux_Persistance"] = None
         if segment == "cds":
             table = _enrich_cds_metrics(table, filters)
         return PerformanceContext(segment=segment, filters=filters, table=table, message="Aucune transaction sur la periode.")
@@ -181,20 +198,72 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
     hvc_set = get_hvc_msisdns()
     others_set = get_mvc_lvc_msisdns() if _SEGMENT_HVC_OTHERS_SPLIT[segment] else set()
 
-    hvc_others = _compute_hvc_others(tx, hvc_set, others_set, split=_SEGMENT_HVC_OTHERS_SPLIT[segment])
+    if segment == "pr_caisse":
+        performance_conn = get_connection()
+        try:
+            hvc_others = compute_pr_portfolio_metrics(
+                tx, hvc_set, others_set, filters.start_date, filters.end_date, performance_conn
+            )
+        finally:
+            performance_conn.close()
+    else:
+        hvc_others = compute_hvc_others_polars(tx, hvc_set, others_set, split=_SEGMENT_HVC_OTHERS_SPLIT[segment])
+        if segment == "cds" and not tx.empty:
+            cds_map = get_hvc_cds_assignments()
+            tx_mapped = tx.merge(cds_map, left_on="To_clean", right_on="hvc_msisdn", how="left")
+            tx_mapped["In_Portfolio"] = (tx_mapped["cds_nom"] == tx_mapped["Actor_Nom"])
+            tx_out = tx_mapped[~tx_mapped["In_Portfolio"] & tx_mapped["To_clean"].isin(hvc_set)]
+            
+            if not tx_out.empty:
+                hp_metrics = tx_out.groupby("Actor_MSISDN").agg(
+                    Hors_Portefeuille_POS=("To_clean", "nunique"),
+                    FD_Hors_Portefeuille=("Amount", "sum")
+                ).reset_index()
+                hvc_others = hvc_others.merge(hp_metrics, on="Actor_MSISDN", how="left")
+                hvc_others["Hors_Portefeuille_POS"] = hvc_others.get("Hors_Portefeuille_POS", 0).fillna(0)
+                hvc_others["FD_Hors_Portefeuille"] = hvc_others.get("FD_Hors_Portefeuille", 0).fillna(0)
+                
+                hvc_others["HVC_Serve"] = (hvc_others["HVC_Serve"] - hvc_others["Hors_Portefeuille_POS"]).clip(lower=0)
+                hvc_others["FD_HVC"] = (hvc_others["FD_HVC"] - hvc_others["FD_Hors_Portefeuille"]).clip(lower=0)
+
     dotation = _compute_dotation(filters, actor_pool)
 
     table = actor_pool.merge(hvc_others, on="Actor_MSISDN", how="left")
     table = table.merge(dotation, on="Actor_MSISDN", how="left")
 
-    numeric_cols = ["Nb_Jours", "FD_HVC", "HVC_Serve", "Nb_Trans_HVC", "FD_Others", "Other_Serve", "Nb_Trans_Other", "Dotation_Montant"]
+    if segment == "pr_caisse":
+        assigned_only = compute_coverage_persistence(
+            pd.DataFrame(), "pr_caisse", filters.start_date, filters.end_date
+        )
+        if not assigned_only.empty:
+            assigned_map = assigned_only.set_index("Actor_MSISDN")["POS_Attribues"]
+            table["POS_Attribues"] = pd.to_numeric(
+                table["POS_Attribues"], errors="coerce"
+            ).fillna(table["Actor_MSISDN"].map(assigned_map)).fillna(0).astype(int)
+    else:
+        # Calcul de Couverture et Persistance
+        coverage = compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date)
+        table = table.merge(coverage, on="Actor_MSISDN", how="left")
+
+    numeric_cols = [
+        "Nb_Jours", "FD_HVC", "HVC_Serve", "Nb_Trans_HVC", "FD_Others",
+        "Other_Serve", "Nb_Trans_Other", "Hors_Portefeuille_POS",
+        "FD_Hors_Portefeuille", "POS_Touches", "POS_Attribues", "Dotation_Montant",
+    ]
     for col in numeric_cols:
         if col not in table.columns:
             table[col] = 0
         table[col] = pd.to_numeric(table[col], errors="coerce").fillna(0)
 
-    table["Sigma_FD"] = table["FD_HVC"] + table["FD_Others"]
-    table["Sigma_POS_Serve"] = table["HVC_Serve"] + table["Other_Serve"]
+    if segment == "pr_caisse":
+        table["Sigma_FD"] = pd.to_numeric(table["FD_HVC"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Others"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Hors_Portefeuille"], errors="coerce").fillna(0).astype(int)
+        table["Sigma_POS_Serve"] = pd.to_numeric(table["HVC_Serve"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["Other_Serve"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["Hors_Portefeuille_POS"], errors="coerce").fillna(0).astype(int)
+    elif segment == "commercial":
+        table["Sigma_FD"] = (table["FD_HVC"] + table["FD_Others"] + table["FD_Hors_Portefeuille"]).round(0).astype(int)
+        table["Sigma_POS_Serve"] = (table["HVC_Serve"] + table["Other_Serve"] + table["Hors_Portefeuille_POS"]).astype(int)
+    else: # cds
+        table["Sigma_FD"] = (table["FD_HVC"] + table["FD_Hors_Portefeuille"]).round(0).astype(int)
+        table["Sigma_POS_Serve"] = (table["HVC_Serve"] + table["Hors_Portefeuille_POS"]).astype(int)
 
     top_commerciaux = pd.DataFrame()
 
@@ -205,7 +274,7 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
         is_single_day = (filters.start_date == filters.end_date)
 
         # Calcul des activités quotidiennes adapté
-        activity = _compute_daily_activity(tx, is_single_day=is_single_day)
+        activity = compute_daily_activity_polars(tx, is_single_day=is_single_day)
         table = table.merge(activity, on="Actor_MSISDN", how="left")
         table["Nb_Jours"] = pd.to_numeric(table.get("Nb_Jours_Actifs"), errors="coerce").fillna(0)
         table = _add_rotation_rates(table)
@@ -274,26 +343,31 @@ def _load_actor_pool(filters: PerformanceFilters) -> pd.DataFrame:
             zone_territoire=filters.zone_territoire,
             zone_sa=filters.zone_sa,
         )
-        return df.rename(columns={
+        df = df.rename(columns={
             "ccial_msisdn": "Actor_MSISDN",
             "nom_ccial": "Actor_Nom",
             "zone_centre": "Zone_Centre",
             "zone_territoire": "Zone_Territoire",
             "zone_sa": "Zone_SA",
         })
-    if segment == "pr_caisse":
+    elif segment == "pr_caisse":
         df = get_point_relay_referentiel(type_point=filters.type_point, territoire=filters.territoire)
-        return df.rename(columns={
+        df = df.rename(columns={
             "msisdn_pr": "Actor_MSISDN",
             "nom": "Actor_Nom",
             "territoire": "Territoire",
             "localisation": "Localisation",
             "type_point": "Type_Point",
         })
-    if segment == "cds":
+    elif segment == "cds":
         df = get_cds_referentiel()
-        return df.rename(columns={"cds_msisdn": "Actor_MSISDN", "nom_cds": "Actor_Nom"})
-    raise ValueError(f"Segment inconnu: {segment}")
+        df = df.rename(columns={"cds_msisdn": "Actor_MSISDN", "nom_cds": "Actor_Nom"})
+    else:
+        raise ValueError(f"Segment inconnu: {segment}")
+    
+    if not df.empty and "Actor_MSISDN" in df.columns:
+        df["Actor_MSISDN"] = df["Actor_MSISDN"].map(clean_phone)
+    return df
 
 
 def _load_and_scope_transactions(filters: PerformanceFilters, excluded: frozenset) -> pd.DataFrame:
@@ -313,6 +387,16 @@ def _load_and_scope_transactions(filters: PerformanceFilters, excluded: frozense
         tx_types=["Transfer"],
         min_amount=MIN_TRANSFER_AMOUNT,
     )
+    if tx.empty:
+        return tx
+
+    # Les transactions historiques peuvent avoir ete ingerees avant la
+    # normalisation. On recanonise les deux numeros avant tout filtre/metrique.
+    for column in ("From_clean", "To_clean", "Actor_MSISDN"):
+        if column in tx.columns:
+            tx[column] = tx[column].map(clean_phone)
+    tx["Amount"] = pd.to_numeric(tx["Amount"], errors="coerce").fillna(0)
+    tx = tx[tx["Amount"] >= MIN_TRANSFER_AMOUNT].copy()
     if tx.empty:
         return tx
 

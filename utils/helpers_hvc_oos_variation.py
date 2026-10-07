@@ -30,8 +30,24 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import base64
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
+
+def generate_download_link(label: str, data: bytes, file_name: str, mime_type: str) -> str:
+    """Génère un lien HTML brut pour forcer le téléchargement sans provoquer de rafraîchissement Streamlit."""
+    b64 = base64.b64encode(data).decode()
+    return f'''
+        <a href="data:{mime_type};base64,{b64}" download="{file_name}" 
+           style="display: inline-flex; align-items: center; justify-content: center; 
+                  background-color: rgb(255, 255, 255); color: rgb(49, 51, 63); 
+                  border: 1px solid rgba(49, 51, 63, 0.2); padding: 0.25rem 0.75rem; 
+                  border-radius: 0.5rem; text-decoration: none; line-height: 1.6; 
+                  font-size: 14px; width: 100%; box-sizing: border-box; 
+                  font-family: sans-serif; cursor: pointer;">
+           {label}
+        </a>
+    '''
 
 import matplotlib
 matplotlib.use("Agg")

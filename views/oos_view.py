@@ -68,6 +68,7 @@ from utils.helpers_hvc_oos_variation import (
     export_images_by_clusters_zip,
     load_zones_mapping_from_setting,
     load_dsm_mapping_from_settings,
+    generate_download_link,
 )
 from scripts.clear_listing_oos import clear_listing_oos
 from models.oos_model import get_oos_snapshot_options, delete_oos_snapshot
@@ -256,7 +257,7 @@ def render_oos_hvc_hub() -> None:
     st.title("OOS & Variations HVC")
 
     options = load_filter_options()
-    filters, tab_listing, tab_variation, tab_tx, tab_upload = _render_layout(options)
+    filters, tab_listing, tab_variation, tab_tx, tab_upload, tab_priorisation = _render_layout(options)
 
     context = build_oos_hvc_context(filters)
 
@@ -283,6 +284,9 @@ def render_oos_hvc_hub() -> None:
 
     with tab_upload:
         _render_upload_section()
+        
+    with tab_priorisation:
+        _render_priorisation_float_tab()
 
 def _render_tx_to_oos_tab() -> None:
     """Onglet : upload transactions → HVC balance < oos_target → listing OOS."""
@@ -460,11 +464,12 @@ def _render_layout(options: dict):
     with c6:
         hour_range = st.slider("Plage horaire", 0, 23, (0, 23), key="ohv_hour")
 
-    tab_listing, tab_variation, tab_tx, tab_upload = st.tabs([
+    tab_listing, tab_variation, tab_tx, tab_upload, tab_priorisation = st.tabs([
         "Listing OOS",
         "Variations HVC",
         "Transactions → OOS",
         "Upload / Sync",
+        "Priorisation Float"
     ])
 
     filters = OosHvcFilters(
@@ -473,7 +478,7 @@ def _render_layout(options: dict):
         date_start=date_start, date_end=date_end,
         hour_min=hour_range[0], hour_max=hour_range[1],
     )
-    return filters, tab_listing, tab_variation, tab_tx, tab_upload
+    return filters, tab_listing, tab_variation, tab_tx, tab_upload, tab_priorisation
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +648,7 @@ def _render_frequently_oos_section(df_full: pd.DataFrame) -> None:
         "Suivi des POS en rupture fréquente avec segmentation par comportement (%OOS Moyen, Durée Moyenne OOS, Float Moyen et Site de rattachement)."
     )
 
-    c1, _ = st.columns([2.5, 1.5])
+    c1, c2, c3 = st.columns([2, 1.5, 2])
     with c1:
         behavior_filter = st.selectbox(
             "Filtre de Comportement OOS (Slicing)",
@@ -657,8 +662,39 @@ def _render_frequently_oos_section(df_full: pd.DataFrame) -> None:
             key="oos_freq_slicing_select",
             help="Chronique = Rupture lourde ou persistante (>= 3 snapshots consécutifs ou >= 35% du temps). Récurrent = Ruptures répétées sur plusieurs jours ou >= 1.8 fois/jour. Nouveau = 1ère apparition sur le dernier snapshot. Occasionnel = Rupture ponctuelle isolée."
         )
+    with c2:
+        hour_filter_opts = ["Toutes"] + [f"{h:02d}h" for h in range(24)]
+        freq_hour_filter = st.selectbox(
+            "Heure de rupture",
+            hour_filter_opts,
+            key="oos_freq_hour_select",
+            help="Filtrer les POS fréquemment en rupture à une heure précise."
+        )
+    with c3:
+        weekend_filter = st.selectbox(
+            "Analyse ciblée Week-end (Anticipation)",
+            ["Désactivée", "Dimanche seul (via Lundi 06h)", "Samedi uniquement (+Vendredi soir)"],
+            key="oos_freq_weekend_filter",
+            help="Filtre l'historique sur les périodes du week-end pour repérer les POS qui tombent systématiquement en rupture ces jours-là (afin d'anticiper le réapprovisionnement)."
+        )
 
-    df_freq = compute_frequently_oos_metrics(df_full, behavior_filter=behavior_filter)
+    hour_val = None if freq_hour_filter == "Toutes" else int(freq_hour_filter.replace("h", ""))
+    
+    if weekend_filter != "Désactivée":
+        hour_val = None  # On annule le filtre horaire manuel car le mode Week-end prend le relais
+        if not df_full.empty and "snapshot_date" in df_full.columns:
+            ts = pd.to_datetime(df_full["snapshot_date"], errors="coerce")
+            if weekend_filter == "Dimanche seul (via Lundi 06h)":
+                # Dimanche déduit via Lundi matin 6h
+                df_full = df_full[(ts.dt.dayofweek == 0) & (ts.dt.hour == 6)]
+            elif weekend_filter == "Samedi uniquement (+Vendredi soir)":
+                # Samedi toutes les heures (5) + Vendredi à partir de 18h (4)
+                df_full = df_full[
+                    (ts.dt.dayofweek == 5) | 
+                    ((ts.dt.dayofweek == 4) & (ts.dt.hour >= 18))
+                ]
+
+    df_freq = compute_frequently_oos_metrics(df_full, behavior_filter=behavior_filter, hour_filter=hour_val)
 
     if df_freq.empty:
         st.info("Aucun POS trouvé pour ce filtre de comportement.")
@@ -693,23 +729,33 @@ def _render_frequently_oos_section(df_full: pd.DataFrame) -> None:
     styled = df_freq.style.apply(_style_freq, axis=1)
     st.dataframe(styled, use_container_width=True, hide_index=True, height=450)
 
-    c1, c2 = st.columns(2)
+    df_export = df_freq.rename(columns={
+        "Numéro POS": "Numero du POS",
+        "Nom POS": "Nom du POS",
+        "Commercial Attribué": "Ccial en charge"
+    })
+
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.download_button(
-            "📄 CSV OOS Frequently",
-            to_csv(df_freq),
-            "pos_frequently_oos.csv",
-            "text/csv",
-            key="btn_exp_freq_csv",
-        )
+        st.markdown(generate_download_link("📄 CSV OOS Frequently", to_csv(df_freq), "pos_frequently_oos.csv", "text/csv"), unsafe_allow_html=True)
     with c2:
-        st.download_button(
-            "📊 Excel OOS Frequently",
-            to_excel(df_freq, sheet_name="POS Frequently OOS"),
-            "pos_frequently_oos.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="btn_exp_freq_xlsx",
-        )
+        st.markdown(generate_download_link("📊 Excel OOS Frequently", to_excel(df_freq, sheet_name="POS Frequently OOS"), "pos_frequently_oos.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), unsafe_allow_html=True)
+    with c3:
+        zip_cluster = _export_images_by_cluster_zip(df_export, cluster_col="Cluster")
+        if zip_cluster:
+            st.markdown(generate_download_link("📸 ZIP par Cluster", zip_cluster, "frequently_oos_par_cluster.zip", "application/zip"), unsafe_allow_html=True)
+        else:
+            st.caption("Pas d'image par cluster")
+    with c4:
+        df_etoudi = df_export[df_export.get("Territory", "").str.upper() == "YAOUNDE ETOUDI"] if "Territory" in df_export.columns else pd.DataFrame()
+        if not df_etoudi.empty:
+            zip_etoudi = _export_images_by_commercial_zip(df_etoudi, ccial_col="Ccial en charge")
+            if zip_etoudi:
+                st.markdown(generate_download_link("📸 ETOUDI par Ccial (ZIP)", zip_etoudi, "frequently_oos_etoudi_par_ccial.zip", "application/zip"), unsafe_allow_html=True)
+            else:
+                st.caption("Erreur export Etoudi")
+        else:
+            st.caption("Pas de données Etoudi")
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1077,7 @@ def _render_hvc_frequently_oos(filters: OosHvcFilters) -> None:
             key="hvc_freq_oos_xlsx"
         )
 
+@st.cache_data(show_spinner=False, ttl=300)
 def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster") -> Optional[bytes]:
     if df.empty or cluster_col not in df.columns:
         return None
@@ -1040,8 +1087,27 @@ def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster"
             df_c = df[df[cluster_col] == cluster]
             if df_c.empty:
                 continue
+            if "Ccial en charge" in df_c.columns:
+                df_c = df_c.sort_values(by="Ccial en charge", ascending=True)
             pages = _render_pos_table_pages(df_c, f"POS OOS — {cluster}")
             clean_name = re.sub(r'[^\w\-_\. ]', '_', str(cluster))
+            for i, png in enumerate(pages, start=1):
+                suffix = f"_p{i}" if len(pages) > 1 else ""
+                zf.writestr(f"pos_oos_{clean_name}{suffix}.png", png)
+    return zip_buffer.getvalue()
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _export_images_by_commercial_zip(df: pd.DataFrame, ccial_col: str = "Ccial en charge") -> Optional[bytes]:
+    if df.empty or ccial_col not in df.columns:
+        return None
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for ccial in sorted(df[ccial_col].dropna().unique().tolist()):
+            df_c = df[df[ccial_col] == ccial]
+            if df_c.empty:
+                continue
+            pages = _render_pos_table_pages(df_c, f"POS OOS — {ccial}")
+            clean_name = re.sub(r'[^\w\-_\. ]', '_', str(ccial))
             for i, png in enumerate(pages, start=1):
                 suffix = f"_p{i}" if len(pages) > 1 else ""
                 zf.writestr(f"pos_oos_{clean_name}{suffix}.png", png)
@@ -1050,24 +1116,43 @@ def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster"
 
 def _render_exports_oos(df: pd.DataFrame, styles: dict, group_col: Optional[str]) -> None:
     has_group = bool(group_col) and group_col in df.columns
-    cols = st.columns(3 if has_group else 2)
-    cols[0].download_button("CSV", to_csv(df), "oos_listing.csv", "text/csv", key="oos_csv")
-    cols[1].download_button(
+    df_etoudi = df[df.get("Territory", "").str.upper() == "YAOUNDE ETOUDI"] if "Territory" in df.columns else pd.DataFrame()
+    has_etoudi = not df_etoudi.empty
+
+    num_cols = 2
+    if has_group: num_cols += 1
+    if has_etoudi: num_cols += 1
+
+    cols = st.columns(num_cols)
+    col_idx = 0
+
+    cols[col_idx].download_button("CSV", to_csv(df), "oos_listing.csv", "text/csv", key="oos_csv")
+    col_idx += 1
+
+    cols[col_idx].download_button(
         "Excel", to_excel(df, styles=styles, sheet_name="Listing OOS"),
         "oos_listing.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="oos_xlsx",
     )
-    # cols[2].download_button(
-    #     "Image", to_image(df, styles=styles, title="Listing OOS"),
-    #     "oos_listing.png", "image/png", key="oos_png",
-    # )
+    col_idx += 1
+
     if has_group:
         zip_file = _export_images_by_cluster_zip(df, cluster_col=group_col)
         if zip_file:
-            cols[2].download_button(
+            cols[col_idx].download_button(
                 "ZIP par cluster", zip_file, "oos_listing_by_cluster.zip", "application/zip",
                 key="oos_zip",
             )
+        col_idx += 1
+        
+    if has_etoudi:
+        zip_etoudi = _export_images_by_commercial_zip(df_etoudi)
+        if zip_etoudi:
+            cols[col_idx].download_button(
+                "📸 ETOUDI par Ccial (ZIP)", zip_etoudi, "oos_etoudi_par_ccial.zip", "application/zip",
+                key="oos_etoudi_zip",
+            )
+        col_idx += 1
 
 
 # ---------------------------------------------------------------------------
@@ -1638,31 +1723,47 @@ def _variation_styles() -> dict:
 
 def _render_upload_section() -> None:
     st.subheader("Upload OOS")
-    st.caption("Snapshot instantané des POS en rupture. L'ingestion s'exécute automatiquement dès le dépôt du fichier.")
-    oos_file = st.file_uploader(
-        "Fichier OOS (.xlsx / .csv)",
+    st.caption("Snapshot instantané des POS en rupture. Vous pouvez forcer la date du snapshot (utile en cas d'oubli de chargement).")
+    
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        manual_date = st.date_input("Date du snapshot (Optionnel)", value=None, key="oos_manual_date", help="Laissez vide pour utiliser la date du jour ou celle du fichier.")
+    with c2:
+        manual_time = st.time_input("Heure du snapshot (Optionnel)", value=None, key="oos_manual_time")
+
+    oos_files = st.file_uploader(
+        "Fichier(s) OOS (.xlsx / .csv)",
         type=["xlsx", "csv"],
-        key="oos_upload_file",
-        accept_multiple_files=False,
+        key="oos_upload_files",
+        accept_multiple_files=True,
     )
 
-    if oos_file:
-        file_key = f"oos_{oos_file.name}_{oos_file.size}"
-        if st.session_state.get("last_ingested_oos_file") != file_key:
-            with st.spinner("Ingestion directe du fichier OOS (Polars)..."):
-                result = sync_oos_to_sqlite(oos_file)
-            if result.get("error"):
-                st.error(f"Erreur d'ingestion : {result['error']}")
-            else:
-                st.session_state["last_ingested_oos_file"] = file_key
+    if oos_files:
+        if st.button(f"Lancer l'ingestion de {len(oos_files)} fichier(s) OOS", type="primary"):
+            manual_snapshot_date = None
+            if manual_date:
+                t = manual_time.strftime("%H:%M:%S") if manual_time else "00:00:00"
+                manual_snapshot_date = f"{manual_date.strftime('%Y-%m-%d')} {t}"
+                if len(oos_files) > 1:
+                    st.warning("⚠️ Attention : La date forcée sera appliquée à TOUS les fichiers de ce lot. Si vous souhaitez des dates différentes, laissez les champs vides pour utiliser la date des noms de fichiers.")
+
+            with st.spinner(f"Ingestion directe de {len(oos_files)} fichier(s) OOS (Polars)..."):
+                total_lignes = 0
+                for oos_file in oos_files:
+                    result = sync_oos_to_sqlite(oos_file, manual_snapshot_date)
+                    
+                    if result.get("error"):
+                        st.error(f"Erreur d'ingestion pour {oos_file.name} : {result['error']}")
+                    else:
+                        inserted = result.get('lignes_inserees', 0)
+                        total_lignes += inserted
+                        st.success(
+                            f"✅ {oos_file.name} ingéré avec succès : {inserted} lignes "
+                            f"| snapshot : {result.get('snapshot_date')}"
+                        )
+                
                 st.cache_data.clear()
-                st.success(
-                    f"✅ Ingestion automatique réussie : {result.get('lignes_inserees', 0)} lignes "
-                    f"| snapshot : {result.get('snapshot_date')}"
-                )
-                st.rerun()
-        else:
-            st.info(f"Fichier OOS à jour : {oos_file.name}")
+                st.info(f"🎉 Ingestion du lot terminée ! Total : {total_lignes} lignes insérées.")
 
     st.markdown("---")
     st.subheader("Upload HVC Variations")
@@ -1693,3 +1794,112 @@ def _render_upload_section() -> None:
             if inserted:
                 st.success(f"✅ Ingestion automatique réussie : {inserted} lignes insérées sur {len(new_files)} fichier(s).")
                 st.rerun()
+
+# ---------------------------------------------------------------------------
+# Onglet Priorisation Float
+# ---------------------------------------------------------------------------
+
+def _render_priorisation_float_tab() -> None:
+    st.subheader("Priorisation HVC Float")
+    st.caption("Produire une liste priorisée des agents en rupture de float ou sur le point de l'être, restreinte aux segments HVC.")
+    
+    float_file = st.file_uploader(
+        "Fichier de suivi float agents (.xlsx / .csv)",
+        type=["xlsx", "csv"],
+        key="float_priorisation_file"
+    )
+    
+    if float_file:
+        try:
+            if float_file.name.endswith('.csv'):
+                df_float = pd.read_csv(float_file)
+            else:
+                df_float = pd.read_excel(float_file)
+                
+            st.success(f"Fichier chargé avec succès : {len(df_float)} lignes.")
+            
+            # Mapping columns UI
+            st.markdown("#### Correspondance des colonnes")
+            cols = list(df_float.columns)
+            
+            # Auto-detect defaults
+            def get_default(candidates):
+                return next((c for c in cols if any(cand.lower() in c.lower() for cand in candidates)), cols[0])
+                
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                col_msisdn = st.selectbox("Agent MSISDN", cols, index=cols.index(get_default(['msisdn', 'number', 'agent'])))
+                col_name = st.selectbox("Agent Name", cols, index=cols.index(get_default(['name', 'nom'])))
+                col_status = st.selectbox("Status", cols, index=cols.index(get_default(['status', 'statut'])))
+            with c2:
+                col_balance = st.selectbox("Balance", cols, index=cols.index(get_default(['balance', 'solde'])))
+                col_float_req = st.selectbox("Float Required", cols, index=cols.index(get_default(['required', 'requis'])))
+                col_avg_hourly = st.selectbox("Average Hourly Float", cols, index=cols.index(get_default(['hourly', 'average', 'variation'])))
+            
+            with c3:
+                threshold_proche = st.number_input("Seuil 'Rupture Proche' (heures)", value=24, min_value=1)
+                threshold_surveiller = st.number_input("Seuil 'À Surveiller' (heures)", value=72, min_value=1)
+                
+            if st.button("Lancer la Priorisation", type="primary"):
+                with st.spinner("Traitement en cours..."):
+                    import datetime
+                    from controllers.oos_priorisation_controller import process_float_priorisation, create_excel_report
+                    from ingestion.upload_sync import _extract_date_from_filename
+                    
+                    snapshot_date = _extract_date_from_filename(float_file.name)
+                    if not snapshot_date:
+                        snapshot_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                    result = process_float_priorisation(
+                        df_float, col_msisdn, col_name, col_status, 
+                        col_balance, col_float_req, col_avg_hourly,
+                        threshold_proche, threshold_surveiller
+                    )
+                    
+                    df_final = result['df_final']
+                    
+                    if df_final.empty:
+                        st.warning("Aucun agent HVC trouvé après filtrage.")
+                    else:
+                        st.success(f"Traitement terminé ! {len(df_final)} agents HVC trouvés.")
+                        
+                        excel_data = create_excel_report(result, snapshot_date)
+                        
+                        st.download_button(
+                            label="📥 Télécharger le rapport Excel complet",
+                            data=excel_data,
+                            file_name=f"priorisation_float_hvc_{snapshot_date.replace(':', '').replace(' ', '_')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        
+                        # Generate ZIP of lists per cluster
+                        import io
+                        import zipfile
+                        
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                            clusters = df_final['Cluster'].unique()
+                            for cl in clusters:
+                                if pd.isna(cl) or cl == 'N/A': continue
+                                df_cl = df_final[df_final['Cluster'] == cl]
+                                if df_cl.empty: continue
+                                
+                                df_cl = df_cl.sort_values(['Classification', 'Heures Avant Rupture'], ascending=[True, True])
+                                csv_str = df_cl.to_csv(index=False, sep=';', encoding='utf-8-sig')
+                                # Clean cluster name for filename
+                                safe_cl = str(cl).replace('/', '_').replace('\\', '_')
+                                zf.writestr(f"Priorisation_Cluster_{safe_cl}.csv", csv_str)
+                                
+                        st.download_button(
+                            label="🗜️ Télécharger les listes par cluster (ZIP)",
+                            data=zip_buffer.getvalue(),
+                            file_name="listes_clusters_float.zip",
+                            mime="application/zip"
+                        )
+                        
+                        st.markdown("### Aperçu des Urgences (RUPTURE & RUPTURE_PROCHE)")
+                        urgents = df_final[df_final['Classification'].isin(['RUPTURE', 'RUPTURE_PROCHE'])]
+                        st.dataframe(urgents, use_container_width=True)
+                        
+        except Exception as e:
+            st.error(f"Erreur lors du traitement : {e}")

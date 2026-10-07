@@ -19,7 +19,7 @@ def show_settings():
     st.title("⚙️ Settings - Configurations")
     st.markdown("**Chargez ici tous les fichiers et configurations de l'application**")
 
-    (tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12,
+    (tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13,
     ) = st.tabs([
         "Commerciaux",
         "Caisses",
@@ -32,7 +32,8 @@ def show_settings():
         "Sites Etoudi",
         "HVC Commercial",
         "HVC CDS (Quota)",
-        "Cibles POS (OOS / Day Target)",   # ← nouveau
+        "Cibles POS (OOS / Day Target)",
+        "Mapping PR -> POS",
     ])
 
     # ===================== ONGLET COMMERCIAUX =====================
@@ -256,6 +257,20 @@ def show_settings():
                 except Exception as e:
                     st.error(f"Échec : {e}")
 
+    with tab13:
+        st.subheader("Fichier Mapping Points Relais -> POS")
+        st.markdown(
+            "Colonnes attendues : `point_de_proximite`, `numero_du_point`, "
+            "`numero_pos`. Un POS absent de `referentiel_pos` est enregistré à `0`."
+        )
+        _handle_reference_upload(
+            tab_title="Fichier Mapping PR POS",
+            uploader_label="Upload fichier pos_point_relais",
+            uploader_key="pos_point_relais_file_uploader",
+            session_key="pos_point_relais_df",
+            folder_name="pos_point_relais",
+        )
+
     st.divider()
 
     # ===================== SYNCHRONISATION VERS SQLITE =====================
@@ -291,6 +306,7 @@ def show_settings():
                     ("Points Relais/Caisses", "point_relay_referentiel"),
                     ("Mapping HVC->Commercial", "hvc_commercial_mapping"),
                     ("Quota HVC->CDS", "hvc_cds_assignments"),
+                    ("Mapping PR->POS", "pos_point_relais"),
                 ]
                 for i, (label, key) in enumerate(labels):
                     cols[i % 4].metric(label, counts.get(key, 0))

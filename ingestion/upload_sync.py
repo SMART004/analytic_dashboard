@@ -234,7 +234,20 @@ def sync_segment_to_sqlite(
     }
 
 
-def sync_oos_to_sqlite(uploaded_file: Any) -> dict:
+def _extract_date_from_filename(filename: str) -> str | None:
+    import re
+    # Cherche YYYY-MM-DD ou YYYYMMDD
+    # Optionnellement suivi de T ou _ ou espace, et HH:MM:SS ou HH-MM-SS ou HH:MM
+    match = re.search(r'(\d{4})[-_]?(\d{2})[-_]?(\d{2})(?:[T_ ]?(\d{2})[:-]?(\d{2})[:-]?(\d{2})?)?', filename)
+    if match:
+        y, m, d, hh, mm, ss = match.groups()
+        if hh and mm:
+            ss = ss if ss else '00'
+            return f"{y}-{m}-{d} {hh}:{mm}:{ss}"
+        return f"{y}-{m}-{d} 00:00:00"
+    return None
+
+def sync_oos_to_sqlite(uploaded_file: Any, manual_snapshot_date: Optional[str] = None) -> dict:
     """Lit un fichier OOS uploade avec Polars (calamine), detecte la date snapshot,
     ingere dans SQLite.
 
@@ -249,13 +262,16 @@ def sync_oos_to_sqlite(uploaded_file: Any) -> dict:
 
         df = df_pl.to_pandas()
 
-        # snapshot_date : colonne dediee si presente, sinon date du jour.
-        if "snapshot_date" in df.columns:
+        # snapshot_date : manuelle si fournie, sinon colonne dediee, sinon nom du fichier, sinon date du jour.
+        if manual_snapshot_date:
+            snapshot_date = manual_snapshot_date
+        elif "snapshot_date" in df.columns:
             snapshot_date = str(df["snapshot_date"].iloc[0])
         elif "date" in df.columns:
             snapshot_date = str(pd.to_datetime(df["date"].iloc[0]).date())
         else:
-            snapshot_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            extracted = _extract_date_from_filename(uploaded_file.name)
+            snapshot_date = extracted if extracted else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         conn = get_connection()
         try:
@@ -285,15 +301,9 @@ def sync_hvc_variation_to_sqlite(uploaded_file: Any) -> dict:
 
         df = df_pl.to_pandas()
 
-        # Horodatage : extrait du nom de fichier si format ISO reconnu,
-        # sinon datetime.now() — meme logique que variations_hvc.py original
-        # qui utilisait l'horodatage du fichier stocké.
-        import re
-        ts_match = re.search(r"(\d{4}-\d{2}-\d{2}[T_]\d{2}[:-]\d{2})", uploaded_file.name)
-        if ts_match:
-            snapshot_timestamp = ts_match.group(1).replace("_", "T").replace("-", ":", 2)
-        else:
-            snapshot_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        # Horodatage : extrait du nom de fichier, sinon datetime.now()
+        extracted = _extract_date_from_filename(uploaded_file.name)
+        snapshot_timestamp = extracted if extracted else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         conn = get_connection()
         try:

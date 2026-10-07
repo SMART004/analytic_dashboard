@@ -1486,7 +1486,7 @@ def render_couverture_portefeuille_commercial(
         st.info("Aucune donnée disponible.")
         return
 
-    # Filtres rapides par centre
+    # Filtres rapides par centre et Zone_SA
     centres_dispo = sorted(df["Centre"].dropna().astype(str).unique().tolist())
     if centres_dispo:
         centre_sel = st.radio(
@@ -1497,6 +1497,17 @@ def render_couverture_portefeuille_commercial(
         )
         if centre_sel != "Tous":
             df = df[df["Centre"] == centre_sel]
+            
+    zones_dispo = sorted(df["Zone_SA"].dropna().astype(str).unique().tolist())
+    if zones_dispo:
+        zone_sel = st.multiselect(
+            "Filtrer par Zone SA",
+            options=zones_dispo,
+            default=[],
+            key="perf_zone_sa_multi",
+        )
+        if zone_sel:
+            df = df[df["Zone_SA"].isin(zone_sel)]
 
     fmt = {
         "Taux couverture (%)": "{:.1f}",

@@ -974,16 +974,34 @@ def _build_portfolio_enriched(
 
     assigned["_comm_msisdn_clean"] = assigned["Commercial_MSISDN"].apply(clean_phone)
 
+    if "Zone_SA_Comm" not in assigned.columns and not tx.empty and "Zone_SA_Comm" in tx.columns:
+        zone_map = tx.dropna(subset=["Zone_SA_Comm", "_from_clean"]).drop_duplicates(subset=["_from_clean"]).set_index("_from_clean")["Zone_SA_Comm"]
+        assigned["Zone_SA_Comm"] = assigned["_comm_msisdn_clean"].map(zone_map)
+
     # Base 1 ligne par commercial
+    def _first_valid(s):
+        valid = s.dropna().astype(str).str.strip()
+        valid = valid[(valid != "") & (valid != "nan") & (valid != "None")]
+        return valid.iloc[0] if not valid.empty else "N/A"
+
+    agg_dict = {
+        "POS_attribues": ("To_clean", "nunique"),
+        "POS_attribues_HVC": ("Category", lambda s: (s == "HVC").sum()) if "Category" in assigned.columns else ("To_clean", lambda _: 0),
+        "POS_attribues_Autres": ("Category", lambda s: s.isin(["MVC", "LVC", "Autres"]).sum()) if "Category" in assigned.columns else ("To_clean", "size"),
+        "Nb_TX_attrib": ("tx_count", "sum") if "tx_count" in assigned.columns else ("To_clean", "size"),
+        "MSISDN_affiche": ("MSISDN_affiche", "first") if "MSISDN_affiche" in assigned.columns else ("Commercial_MSISDN", "first"),
+    }
+    
+    if "Zone_SA_Comm" in assigned.columns:
+        agg_dict["Zone_SA"] = ("Zone_SA_Comm", _first_valid)
+    elif "Zone_SA" in assigned.columns:
+        agg_dict["Zone_SA"] = ("Zone_SA", _first_valid)
+    else:
+        agg_dict["Zone_SA"] = ("Commercial_MSISDN", lambda _: "")
+
     base = (
         assigned.groupby(["Commercial", "Commercial_MSISDN", "_comm_msisdn_clean"], dropna=False)
-        .agg(
-            POS_attribues=("To_clean", "nunique"),
-            Nb_TX_attrib=("tx_count", "sum") if "tx_count" in assigned.columns else ("To_clean", "size"),
-            MSISDN_affiche=("MSISDN_affiche", "first")
-            if "MSISDN_affiche" in assigned.columns
-            else ("Commercial_MSISDN", "first"),
-        )
+        .agg(**agg_dict)
         .reset_index()
     )
 
@@ -1088,6 +1106,14 @@ def _build_portfolio_enriched(
     ).round(1).fillna(0.0)
     base["Capilarite_pct"] = (CAPILLARITE_CIBLE  / base["POS_attribues"] * 100).round(1)
 
+    base["Taux_couverture_HVC_pct"] = (
+        base["Nb_HVC"] / base["POS_attribues_HVC"].replace(0, pd.NA) * 100
+    ).round(1).fillna(0.0)
+
+    base["Taux_couverture_Autres_pct"] = (
+        (base["Nb_MVC"] + base["Nb_LVC"]) / base["POS_attribues_Autres"].replace(0, pd.NA) * 100
+    ).round(1).fillna(0.0)
+
     # Récupération Cash Flow
     try:
         from models.conquete_model import get_commercial_cash_flows, _load_master_caisse_msisdns
@@ -1130,6 +1156,7 @@ def _build_portfolio_enriched(
         "Commercial", "MSISDN_affiche", "Zone_SA", "Source_donnees",
         "POS_attribues", "POS_servis",  
         "Capilarite_pct", "Taux_couverture_pct",
+        "Taux_couverture_HVC_pct", "Taux_couverture_Autres_pct",
         "Nb_HVC", "Nb_MVC", "Nb_LVC",
         "Montant_descendu", "POS_servis_hors_portefeuille", "Montant_descendu_hors_portefeuille",
         "Montant_recu", "Montant_remonte",

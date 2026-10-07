@@ -365,6 +365,7 @@ def _render_pos_table_pages(df: pd.DataFrame, title_prefix: str) -> list:
     return pages
 
 
+@st.cache_data(show_spinner=False, ttl=300)
 def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster") -> Optional[bytes]:
     if df.empty or cluster_col not in df.columns:
         return None
@@ -374,8 +375,28 @@ def _export_images_by_cluster_zip(df: pd.DataFrame, cluster_col: str = "Cluster"
             df_c = df[df[cluster_col] == cluster]
             if df_c.empty:
                 continue
+            if "Ccial en charge" in df_c.columns:
+                df_c = df_c.sort_values(by="Ccial en charge", ascending=True)
             pages = _render_pos_table_pages(df_c, f"POS OOS — {cluster}")
             clean_name = re.sub(r'[^\w\-_\. ]', '_', str(cluster))
+            for i, png in enumerate(pages, start=1):
+                suffix = f"_p{i}" if len(pages) > 1 else ""
+                zf.writestr(f"pos_oos_{clean_name}{suffix}.png", png)
+    return zip_buffer.getvalue()
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _export_images_by_commercial_zip(df: pd.DataFrame, ccial_col: str = "Ccial en charge") -> Optional[bytes]:
+    if df.empty or ccial_col not in df.columns:
+        return None
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for ccial in sorted(df[ccial_col].dropna().unique().tolist()):
+            df_c = df[df[ccial_col] == ccial]
+            if df_c.empty:
+                continue
+            pages = _render_pos_table_pages(df_c, f"POS OOS — {ccial}")
+            clean_name = re.sub(r'[^\w\-_\. ]', '_', str(ccial))
             for i, png in enumerate(pages, start=1):
                 suffix = f"_p{i}" if len(pages) > 1 else ""
                 zf.writestr(f"pos_oos_{clean_name}{suffix}.png", png)
@@ -581,7 +602,7 @@ def show_pos_oos_listing():
     # ===================== EXPORTS =====================
     phase_started_at = time.perf_counter()
     st.markdown("#### Export")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         zip_bytes = _export_images_by_cluster_zip(display_df, cluster_col="Cluster")
@@ -593,9 +614,25 @@ def show_pos_oos_listing():
                 mime="application/zip",
             )
         else:
-            st.caption("Aucune donnée à exporter en image.")
+            st.caption("Aucune donnée à exporter par cluster.")
 
     with c2:
+        df_etoudi = display_df[display_df.get("Territory", "").str.upper() == "YAOUNDE ETOUDI"] if "Territory" in display_df.columns else pd.DataFrame()
+        if not df_etoudi.empty:
+            zip_etoudi = _export_images_by_commercial_zip(df_etoudi)
+            if zip_etoudi:
+                st.download_button(
+                    "📸 ETOUDI par Ccial (ZIP)",
+                    data=zip_etoudi,
+                    file_name="POS_OOS_ETOUDI_par_ccial.zip",
+                    mime="application/zip",
+                )
+            else:
+                st.caption("Erreur export Etoudi.")
+        else:
+            st.caption("Pas de données Etoudi.")
+
+    with c3:
         excel_data = to_excel(display_df)
         st.download_button(
             "📊 Télécharger Excel",
@@ -604,7 +641,7 @@ def show_pos_oos_listing():
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-    with c3:
+    with c4:
         st.download_button(
             "📄 Télécharger CSV",
             display_df.to_csv(index=False).encode('utf-8'),
