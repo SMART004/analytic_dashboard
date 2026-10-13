@@ -13,6 +13,8 @@ def clean_phone(x):
     if pd.isna(x):
         return None
     s = str(x).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
     s = s.replace("FRI:", "").replace("/MSISDN", "").strip()
     return s if s else None
 

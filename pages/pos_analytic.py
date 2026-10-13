@@ -30,6 +30,49 @@ def _load_excluded_to_phones():
     )
 
 
+def _load_masters_phones():
+    """Charge les numéros des comptes Masters depuis Settings avec gestion des formats 9 et 12 chiffres."""
+    masters_df = load_setting("masters")
+    phones = set()
+    if masters_df is not None and not masters_df.empty:
+        # Priorité aux colonnes identifiant expressément un numéro
+        phone_cols = ["NUM", "MSISDN", "NUMERO", "NUMERO_MASTER", "Ccial_MSISDN", "Commercial_MSISDN"]
+        cols_lower = {str(c).strip().lower(): c for c in masters_df.columns}
+        matched_cols = [cols_lower[c.lower()] for c in phone_cols if c.lower() in cols_lower]
+        if not matched_cols:
+            matched_cols = [cols_lower["master"]] if "master" in cols_lower else list(masters_df.columns)
+        
+        phones = _collect_phone_numbers(masters_df, matched_cols)
+
+    if not phones:
+        try:
+            from models.db import get_connection
+            with get_connection() as conn:
+                rows = conn.execute("SELECT msisdn FROM exclusions_reference WHERE category = 'master'").fetchall()
+                if rows:
+                    phones = {clean_phone(r[0]) for r in rows if clean_phone(r[0])}
+        except Exception:
+            pass
+
+    expanded_phones = set()
+    for p in phones:
+        if not p:
+            continue
+        p_str = str(p).strip()
+        if p_str.endswith(".0"):
+            p_str = p_str[:-2]
+        if not p_str.isdigit() or len(p_str) < 8:
+            continue
+        expanded_phones.add(p_str)
+        if p_str.startswith("237") and len(p_str) > 3:
+            expanded_phones.add(p_str[3:])
+        elif len(p_str) == 9:
+            expanded_phones.add(f"237{p_str}")
+
+    return expanded_phones
+
+
+
 def show_gros_transferts():
     st.title("Analyse des Gros Transferts")
 
@@ -157,12 +200,12 @@ def show_gros_transferts():
                 df_persons['phone_from'] = df_persons.get('From', pd.Series()).apply(clean_phone)
                 df_persons['phone_to'] = df_persons.get('To', pd.Series()).apply(clean_phone)
 
-                excluded_to_phones = _load_excluded_to_phones()
-                if excluded_to_phones:
-                    df_persons = df_persons[~df_persons['phone_to'].isin(excluded_to_phones)].copy()
-
                 targeted_phones = st.session_state.gt_targeted_phones
-                exclusion_set = st.session_state.gt_exclusion_set
+                exclusion_set = st.session_state.get('gt_exclusion_set') or _load_excluded_to_phones()
+                masters_set = _load_masters_phones()
+
+                if not masters_set:
+                    st.warning("⚠️ Aucun compte Master trouvé dans Settings (onglet Masters). Veuillez vérifier votre configuration.")
 
                 # Calculs
                 cash_in = df_persons[(df_persons['Type'] == "Cash in") & 
@@ -171,13 +214,14 @@ def show_gros_transferts():
                 cash_out = df_persons[(df_persons['Type'] == "Cash out") & 
                                      df_persons['phone_to'].isin(targeted_phones)].groupby('phone_to')['Amount_num'].sum()
 
+                # Float up : transferts remis UNIQUEMENT aux comptes Master comme destinataire
                 transfer_remis = df_persons[
                     (df_persons['Type'] == "Transfer") &
                     (df_persons['phone_from'].isin(targeted_phones)) &
-                    (df_persons['phone_to'].isin(exclusion_set))
+                    (df_persons['phone_to'].isin(masters_set))
                 ].groupby('phone_from')['Amount_num'].sum()
 
-                # Calcul direct du Transfer envoyé au non exclu
+                # Calcul direct du Transfer envoyé au non exclu (Float down)
                 transfer_envoye_non_exclu = df_persons[
                     (df_persons['Type'] == "Transfer") &
                     (df_persons['phone_from'].isin(targeted_phones)) &

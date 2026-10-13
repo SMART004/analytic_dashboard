@@ -380,22 +380,42 @@ def get_commercial_cash_flows(
         sources = list(master_msisdns | caisse_msisdns)
         if sources:
             src_ph = ",".join(["?"] * len(sources))
+            date_clause_inner = date_clause.replace("t.", "")
             q_recu = f"""
+                WITH FirstDotations AS (
+                    SELECT to_msisdn, 
+                           AVG(first_hour) as avg_first_hour
+                    FROM (
+                        SELECT to_msisdn, 
+                               MIN(hour + (CAST(substr(tx_date, 15, 2) AS REAL) / 60.0)) AS first_hour
+                        FROM transactions
+                        WHERE tx_type = 'Transfer'
+                          AND to_msisdn IN ({placeholders})
+                          AND from_msisdn IN ({src_ph})
+                          AND hour >= 6 AND hour <= 10
+                          {date_clause_inner}
+                        GROUP BY to_msisdn, date_only
+                    )
+                    GROUP BY to_msisdn
+                )
                 SELECT t.to_msisdn AS Commercial_MSISDN,
-                       SUM(t.amount) AS Montant_recu
+                       SUM(t.amount) AS Montant_recu,
+                       f.avg_first_hour AS Heure_dotation_moy
                 FROM transactions t
+                LEFT JOIN FirstDotations f ON t.to_msisdn = f.to_msisdn
                 WHERE t.tx_type = 'Transfer'
                   AND t.to_msisdn IN ({placeholders})
                   AND t.from_msisdn IN ({src_ph})
                   {date_clause}
                 GROUP BY t.to_msisdn
             """
-            # params order: commercial_msisdns + sources + dates
-            params_recu = list(commercial_msisdns) + sources
+            params_single = list(commercial_msisdns) + sources
             if start_date:
-                params_recu.append(start_date)
+                params_single.append(start_date)
             if end_date:
-                params_recu.append(end_date)
+                params_single.append(end_date)
+                
+            params_recu = params_single + params_single
             df_recu = pd.read_sql_query(q_recu, conn, params=params_recu)
         else:
             df_recu = pd.DataFrame(columns=["Commercial_MSISDN", "Montant_recu"])

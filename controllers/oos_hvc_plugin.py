@@ -85,11 +85,15 @@ def build_oos_hvc_analysis(assigned: pd.DataFrame, tx: pd.DataFrame, start_date:
     except:
         hvc_assigned["Site"] = "Inconnu"
 
-    agg_df = hvc_assigned.groupby(["Commercial", "Site"]).agg(
+    agg_df = hvc_assigned.groupby("Site").agg(
+        Commercial=("Commercial", lambda x: ", ".join(sorted(set(x.dropna())))),
         Nb_HVC=("To_clean", "nunique"),
         Jours_OOS=("jours_oos", "sum"),
         Jours_Total=("jours_total", "sum")
     ).reset_index()
+    
+    # Reorder columns to put Site first, then Commercial
+    agg_df = agg_df[["Site", "Commercial", "Nb_HVC", "Jours_OOS", "Jours_Total"]]
     
     agg_df["% OOS HVC (Sévérité)"] = (agg_df["Jours_OOS"] / agg_df["Jours_Total"] * 100).round(1).fillna(0)
     return agg_df.sort_values("% OOS HVC (Sévérité)", ascending=False)

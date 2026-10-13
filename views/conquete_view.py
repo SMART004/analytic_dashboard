@@ -937,6 +937,9 @@ def _render_commercial_portfolio(context: ConqueteContext) -> None:
             if filtre_zones:
                 enriched = enriched[enriched["Zone_SA"].isin(filtre_zones)]
 
+    if "Montant_descendu" in enriched.columns and "Montant_descendu_hors_portefeuille" in enriched.columns:
+        enriched["Montant_total_descendu"] = enriched["Montant_descendu"].fillna(0) + enriched["Montant_descendu_hors_portefeuille"].fillna(0)
+
     disp = enriched.rename(columns={
         "Zone_SA": "Zone SA",
         "MSISDN": "MSISDN",
@@ -949,19 +952,59 @@ def _render_commercial_portfolio(context: ConqueteContext) -> None:
         "Montant_descendu": "Montant descendu",
         "POS_servis_hors_portefeuille": "POS servis (Hors Portefeuille)",
         "Montant_descendu_hors_portefeuille": "Montant descendu (Hors Portefeuille)",
+        "Montant_total_descendu": "Montant total descendu",
         "Montant_recu": "Montant reçu",
         "Montant_remonte": "Montant remonté",
+        "Heure_dotation_moy": "Heure dotation moy.",
         "Heure_debut_moy": "Heure début moy.",
         "Heure_fin_moy": "Heure fin moy.",
         "Nb_TX_attrib": "TX attribuées",
         "Source_donnees": "Fichier Source",
     })
-    for col in ["Montant descendu", "Montant reçu", "Montant remonté", "Montant descendu (Hors Portefeuille)"]:
+
+    if not disp.empty:
+        totaux = {}
+        for col in disp.columns:
+            if col == "Commercial":
+                totaux[col] = "TOTAUX"
+            elif col in ["Zone SA", "MSISDN", "Heure dotation moy.", "Heure début moy.", "Heure fin moy.", "Fichier Source", "_name", "_comm_msisdn_clean"]:
+                totaux[col] = ""
+            elif pd.api.types.is_numeric_dtype(disp[col]):
+                totaux[col] = disp[col].sum()
+            else:
+                totaux[col] = ""
+        
+        sum_attribues = disp["POS attribués"].sum() if "POS attribués" in disp else 0
+        sum_servis = disp["POS servis"].sum() if "POS servis" in disp else 0
+        
+        sum_hvc_attrib = enriched["POS_attribues_HVC"].sum() if "POS_attribues_HVC" in enriched else 0
+        sum_hvc_servis = enriched["POS_servis_HVC"].sum() if "POS_servis_HVC" in enriched else 0
+        
+        sum_autres_attrib = enriched["POS_attribues_Autres"].sum() if "POS_attribues_Autres" in enriched else 0
+        sum_autres_servis = enriched["POS_servis_Autres"].sum() if "POS_servis_Autres" in enriched else 0
+        
+        if "Taux couverture %" in disp.columns:
+            totaux["Taux couverture %"] = round((sum_servis / sum_attribues * 100), 1) if sum_attribues > 0 else 0.0
+            
+        if "Taux couverture HVC %" in disp.columns:
+            totaux["Taux couverture HVC %"] = round((sum_hvc_servis / sum_hvc_attrib * 100), 1) if sum_hvc_attrib > 0 else 0.0
+            
+        if "Taux couverture Autres %" in disp.columns:
+            totaux["Taux couverture Autres %"] = round((sum_autres_servis / sum_autres_attrib * 100), 1) if sum_autres_attrib > 0 else 0.0
+            
+        if "Capilarité %" in disp.columns:
+            nb_commerciaux = len(disp)
+            totaux["Capilarité %"] = round((sum_attribues / (80 * nb_commerciaux) * 100), 1) if nb_commerciaux > 0 else 0.0
+            
+        disp = pd.concat([disp, pd.DataFrame([totaux])], ignore_index=True)
+
+    disp_export = disp.copy()
+    for col in ["Montant descendu", "Montant reçu", "Montant remonté", "Montant descendu (Hors Portefeuille)", "Montant total descendu"]:
         if col in disp.columns:
-            disp[col] = disp[col].apply(_format_fcfa)
+            disp[col] = disp[col].apply(lambda x: _format_fcfa(x) if pd.notna(x) and x != "" else "")
 
     st.dataframe(disp, use_container_width=True, hide_index=True, height=500)
-    _render_exports("conquete_portefeuille_enrichi", enriched, {})
+    _render_exports("conquete_portefeuille_enrichi", disp_export, {})
 
     with st.expander("📋 Détail POS attribués"):
         detail = assigned.rename(columns={
@@ -979,10 +1022,22 @@ def _render_commercial_portfolio(context: ConqueteContext) -> None:
     # === ANALYSE OOS HVC ===
     try:
         from controllers.oos_hvc_plugin import build_oos_hvc_analysis
-        st.markdown("#### % OOS HVC (Sévérité) par Commercial et Site")
+        st.markdown("#### % OOS HVC (Sévérité) par Site")
         st.caption("Calcul V2 : (Total jours OOS / Jours observés) * 100 avec interpolation des week-ends via last_trx_time et résolution par les transactions.")
         oos_df = build_oos_hvc_analysis(assigned, df_tx, context.filters.start_date, context.filters.end_date)
         if not oos_df.empty:
+            fig = px.bar(
+                oos_df, 
+                x="Site", 
+                y="% OOS HVC (Sévérité)", 
+                color="% OOS HVC (Sévérité)",
+                color_continuous_scale="Reds",
+                title="Taux de rupture HVC par Site",
+                hover_data=["Commercial", "Nb_HVC"]
+            )
+            fig.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
+            
             st.dataframe(oos_df, use_container_width=True, hide_index=True)
             _render_exports("conquete_oos_hvc_severite", oos_df, {})
         else:

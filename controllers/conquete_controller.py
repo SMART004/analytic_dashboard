@@ -1145,6 +1145,7 @@ def _build_portfolio_enriched(
 
     base["Heure_debut_moy"] = base["Heure_debut_moy"].apply(_fmt_hour)
     base["Heure_fin_moy"] = base["Heure_fin_moy"].apply(_fmt_hour)
+    base["Heure_dotation_moy"] = base.get("Heure_dotation_moy", pd.Series(dtype=float)).apply(_fmt_hour)
 
     if "MSISDN_affiche" not in base.columns:
         base["MSISDN_affiche"] = base["Commercial_MSISDN"].apply(
@@ -1160,7 +1161,7 @@ def _build_portfolio_enriched(
         "Nb_HVC", "Nb_MVC", "Nb_LVC",
         "Montant_descendu", "POS_servis_hors_portefeuille", "Montant_descendu_hors_portefeuille",
         "Montant_recu", "Montant_remonte",
-        "Heure_debut_moy", "Heure_fin_moy", "Nb_TX_attrib",
+        "Heure_dotation_moy", "Heure_debut_moy", "Heure_fin_moy", "Nb_TX_attrib",
     ]
     out = base[[c for c in cols if c in base.columns]].copy()
     out = out.rename(columns={"MSISDN_affiche": "MSISDN"})

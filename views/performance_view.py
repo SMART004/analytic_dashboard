@@ -44,6 +44,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -275,7 +276,7 @@ def render_performance(context: PerformanceContext) -> None:
         st.info("Aucune donnée à afficher pour ces filtres.")
         return
 
-    display_with_total = _append_total_row(display_df, context.segment)
+    display_with_total = _append_total_row(display_df, context.segment, context=context)
 
     st.dataframe(_style_persistence(display_with_total), use_container_width=True, hide_index=True, height=600)
 
@@ -433,7 +434,11 @@ def _build_top10_display(context: PerformanceContext) -> pd.DataFrame:
 # Ligne TOTAL
 # ---------------------------------------------------------------------------
 
-def _append_total_row(display_df: pd.DataFrame, segment: str) -> pd.DataFrame:
+def _append_total_row(
+    display_df: pd.DataFrame, 
+    segment: str, 
+    context: Optional[PerformanceContext] = None
+) -> pd.DataFrame:
     if display_df.empty:
         return display_df
 
@@ -441,11 +446,85 @@ def _append_total_row(display_df: pd.DataFrame, segment: str) -> pd.DataFrame:
     total: dict[str, Any] = {col: "" for col in display_df.columns}
     total[label_col] = "TOTAL"
 
+    tr_cols = {"TR_HVC (%)", "TR_Other (%)", "TR_General (%)"}
     for col in display_df.select_dtypes(include="number").columns:
-        if col == "Taux_Persistance (%)":
+        if col == "Taux_Persistance (%)" or col in tr_cols:
             total[col] = None
             continue
         total[col] = display_df[col].sum()
+
+    # Recalcul des Taux de Réalisation (TR) pour les commerciaux
+    if segment == "commercial":
+        table = context.table if (context is not None and not context.table.empty) else None
+
+        # 1. TR_HVC (%)
+        if "TR_HVC (%)" in display_df.columns:
+            if table is not None and "Nb_Trans_HVC" in table.columns and "HVC_Serve" in table.columns:
+                nb_trans_hvc = pd.to_numeric(table["Nb_Trans_HVC"], errors="coerce").fillna(0).sum()
+                hvc_serve = pd.to_numeric(table["HVC_Serve"], errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(table.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                cible_hvc = (hvc_serve * nb_jours * 3).sum()
+                total["TR_HVC (%)"] = round((nb_trans_hvc / cible_hvc * 100), 1) if cible_hvc > 0 else 0.0
+            else:
+                hvc_serve = pd.to_numeric(display_df.get("HVC_Serve", 0), errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(display_df.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                cible_hvc = (hvc_serve * nb_jours * 3).sum()
+                tr_hvc_s = pd.to_numeric(display_df.get("TR_HVC (%)", 0), errors="coerce").fillna(0)
+                nb_trans_hvc = (tr_hvc_s * hvc_serve * nb_jours * 3 / 100).sum()
+                total["TR_HVC (%)"] = round((nb_trans_hvc / cible_hvc * 100), 1) if cible_hvc > 0 else 0.0
+
+        # 2. TR_Other (%)
+        if "TR_Other (%)" in display_df.columns:
+            if table is not None and "Nb_Trans_Other" in table.columns and "Other_Serve" in table.columns:
+                nb_trans_other = pd.to_numeric(table["Nb_Trans_Other"], errors="coerce").fillna(0).sum()
+                other_serve = pd.to_numeric(table["Other_Serve"], errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(table.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                cible_other = (other_serve * nb_jours * 3).sum()
+                total["TR_Other (%)"] = round((nb_trans_other / cible_other * 100), 1) if cible_other > 0 else 0.0
+            else:
+                other_serve = pd.to_numeric(display_df.get("Other_Serve", 0), errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(display_df.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                cible_other = (other_serve * nb_jours * 3).sum()
+                tr_other_s = pd.to_numeric(display_df.get("TR_Other (%)", 0), errors="coerce").fillna(0)
+                nb_trans_other = (tr_other_s * other_serve * nb_jours * 3 / 100).sum()
+                total["TR_Other (%)"] = round((nb_trans_other / cible_other * 100), 1) if cible_other > 0 else 0.0
+
+        # 3. TR_General (%)
+        if "TR_General (%)" in display_df.columns:
+            pos_serve_col = "Σ_POS_Serve" if "Σ_POS_Serve" in display_df.columns else "Sigma_POS_Serve"
+            if pos_serve_col in display_df.columns and "Nb_Transactions" in display_df.columns:
+                nb_trans_gen = pd.to_numeric(display_df["Nb_Transactions"], errors="coerce").fillna(0).sum()
+                pos_serve = pd.to_numeric(display_df[pos_serve_col], errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(display_df.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                cible_gen = (pos_serve * nb_jours * 3).sum()
+                total["TR_General (%)"] = round((nb_trans_gen / cible_gen * 100), 1) if cible_gen > 0 else 0.0
+
+        # 4. TPW Intraday windows (TPW 11h, TPW 14h, TPW 17h)
+        if table is not None:
+            for label in WORK_PROGRESS_LABELS:
+                tpw_col = f"TPW {label}"
+                if tpw_col in display_df.columns:
+                    serve_col, tr_col = f"HVC Serve {label}", f"TR_HVC {label}"
+                    other_serve_col, other_tr_col = f"Other Serve {label}", f"TR_Other {label}"
+                    hvc_s = pd.to_numeric(table.get(serve_col, 0), errors="coerce").fillna(0)
+                    other_s = pd.to_numeric(table.get(other_serve_col, 0), errors="coerce").fillna(0)
+                    nb_j = pd.to_numeric(table.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+
+                    tot_hvc = hvc_s.sum()
+                    tot_other = other_s.sum()
+
+                    tr_hvc_s = pd.to_numeric(table.get(tr_col, 0), errors="coerce").fillna(0)
+                    tr_other_s = pd.to_numeric(table.get(other_tr_col, 0), errors="coerce").fillna(0)
+
+                    cible_hvc_w = (hvc_s * nb_j * 3).sum()
+                    trans_hvc_w = (tr_hvc_s * hvc_s * nb_j * 3 / 100).sum()
+                    tr_hvc_tot = round(trans_hvc_w / cible_hvc_w * 100, 1) if cible_hvc_w > 0 else 0.0
+
+                    cible_other_w = (other_s * nb_j * 3).sum()
+                    trans_other_w = (tr_other_s * other_s * nb_j * 3 / 100).sum()
+                    tr_other_tot = round(trans_other_w / cible_other_w * 100, 1) if cible_other_w > 0 else 0.0
+
+                    total[tpw_col] = f"{int(tot_hvc)} | {tr_hvc_tot:.1f}% | {int(tot_other)} | {tr_other_tot:.1f}%"
 
     if "Taux_Couverture (%)" in total and "POS_Attribues" in total:
         total["Taux_Couverture (%)"] = (
