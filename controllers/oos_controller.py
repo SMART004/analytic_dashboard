@@ -979,57 +979,120 @@ def read_tx_files(files) -> pd.DataFrame:
 def extract_hvc_low_balance_from_tx(
     tx_df: pd.DataFrame,
     ref_df: pd.DataFrame,
-) -> pd.DataFrame:
+    return_diagnostics: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """
     1. Mappe From → référentiel POS (clean_phone)
     2. Garde uniquement les HVC
     3. Dernière balance + date dernière trx par POS (via From)
-    4. Filtre Balance < oos_target
+    4. Filtre Balance < oos_target (ou Balance <= 0 pour rupture totale)
+    5. Fournit un diagnostic détaillé si return_diagnostics=True
     """
-    if tx_df.empty or ref_df.empty:
-        return pd.DataFrame()
+    diag = {
+        "total_tx": 0,
+        "unique_from": 0,
+        "hvc_tx": 0,
+        "unique_hvc": 0,
+        "hvc_with_target": 0,
+        "oos_count": 0,
+        "min_balance": None,
+        "max_balance": None,
+        "sample_matched": [],
+    }
+
+    if tx_df is None or tx_df.empty or ref_df is None or ref_df.empty:
+        return (pd.DataFrame(), diag) if return_diagnostics else pd.DataFrame()
 
     df = tx_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
 
-    # Colonnes transactions
-    if "From" not in df.columns:
-        raise ValueError("Colonne 'From' absente des transactions")
-    df["From_clean"] = df["From"].apply(clean_phone)
+    # Colonnes transactions : 'From' (ou numéro émetteur)
+    from_col = next(
+        (c for c in df.columns if str(c).lower() in ["from", "from_msisdn", "agent_msisdn", "num", "msisdn", "sender", "source"]),
+        None,
+    )
+    if not from_col:
+        raise ValueError("Colonne 'From' (ou numéro émetteur) absente des transactions")
 
-    df["Date"] = pd.to_datetime(df.get("Date"), errors="coerce")
-    balance_col = next((c for c in ["Balance", "balance", "Solde"] if c in df.columns), None)
+    df["From_clean"] = df[from_col].apply(clean_phone)
+    df = df[df["From_clean"].notna() & (df["From_clean"] != "")].copy()
+    if df.empty:
+        return (pd.DataFrame(), diag) if return_diagnostics else pd.DataFrame()
+
+    # Colonne 'Date'
+    date_col = next(
+        (c for c in df.columns if str(c).lower() in ["date", "tx_date", "timestamp", "datetime", "created_at", "time"]),
+        None,
+    )
+    if date_col:
+        df["Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    else:
+        df["Date"] = pd.Timestamp.now()
+
+    # Colonne 'Balance'
+    balance_col = next(
+        (c for c in df.columns if str(c).lower() in ["balance", "solde", "float_amount", "reste", "balance_after"]),
+        None,
+    )
     if balance_col is None:
-        raise ValueError("Colonne Balance absente des transactions")
+        raise ValueError("Colonne 'Balance' (ou Solde) absente des transactions")
     df["Balance"] = pd.to_numeric(df[balance_col], errors="coerce")
 
-    # Référentiel
+    diag["total_tx"] = len(df)
+    diag["unique_from"] = int(df["From_clean"].nunique())
+
+    # Référentiel POS
     ref = ref_df.copy()
-    msisdn_col = next((c for c in ["msisdn", "agent_msisdn", "MSISDN"] if c in ref.columns), None)
+    ref.columns = [str(c).strip() for c in ref.columns]
+
+    msisdn_col = next(
+        (c for c in ref.columns if str(c).lower() in ["agent_msisdn", "msisdn", "num", "phone", "telephone"]),
+        None,
+    )
     if not msisdn_col:
         raise ValueError("Colonne MSISDN absente du référentiel POS")
-
     ref["msisdn_clean"] = ref[msisdn_col].apply(clean_phone)
 
-    # oos_target
+    # oos_target & day_target
     oos_target_col = next(
-        (c for c in ["oos_target", "OOS_target", "OOS target"] if c in ref.columns),
+        (c for c in ref.columns if str(c).lower() in ["oos_target", "oos target", "oos_pct"]),
         None,
     )
-    if not oos_target_col:
-        raise ValueError("Colonne oos_target absente du référentiel")
-    ref["oos_target"] = pd.to_numeric(ref[oos_target_col], errors="coerce")
+    ref["oos_target"] = pd.to_numeric(ref[oos_target_col], errors="coerce").fillna(0.0) if oos_target_col else 0.0
 
-    # oos_target
     day_target_col = next(
-        (c for c in ["day_target", "Day_Target"] if c in ref.columns),
+        (c for c in ref.columns if str(c).lower() in ["day_target", "day target"]),
         None,
     )
-    if not day_target_col:
-        raise ValueError("Colonne day_target absente du référentiel")
-    ref["day_target"] = pd.to_numeric(ref[day_target_col], errors="coerce")
+    ref["day_target"] = pd.to_numeric(ref[day_target_col], errors="coerce").fillna(0.0) if day_target_col else 0.0
+
+    # Auto-fallback cibles si toutes les cibles sont nulles dans ref
+    if ref["oos_target"].max() == 0:
+        try:
+            from utils.turso_storage import load_setting
+            pt_df = load_setting("pos_targets")
+            if pt_df is not None and not pt_df.empty:
+                pt_m = next((c for c in pt_df.columns if str(c).lower() in ["msisdn", "agent_msisdn", "num"]), None)
+                pt_o = next((c for c in pt_df.columns if "oos" in str(c).lower()), None)
+                pt_d = next((c for c in pt_df.columns if "day" in str(c).lower()), None)
+                if pt_m and (pt_o or pt_d):
+                    pt_map = pd.DataFrame()
+                    pt_map["msisdn_clean"] = pt_df[pt_m].apply(clean_phone)
+                    if pt_o:
+                        pt_map["_oos_fb"] = pd.to_numeric(pt_df[pt_o], errors="coerce")
+                    if pt_d:
+                        pt_map["_day_fb"] = pd.to_numeric(pt_df[pt_d], errors="coerce")
+                    pt_map = pt_map.drop_duplicates("msisdn_clean")
+                    ref = ref.merge(pt_map, on="msisdn_clean", how="left")
+                    if "_oos_fb" in ref.columns:
+                        ref["oos_target"] = ref["_oos_fb"].fillna(ref["oos_target"])
+                    if "_day_fb" in ref.columns:
+                        ref["day_target"] = ref["_day_fb"].fillna(ref["day_target"])
+        except Exception:
+            pass
 
     # Segment HVC
-    seg_col = next((c for c in ["segment_group", "Segment Group", "Segment"] if c in ref.columns), None)
+    seg_col = next((c for c in ref.columns if str(c).lower() in ["segment_group", "segment group", "segment"]), None)
     if seg_col:
         ref["_is_hvc"] = ref[seg_col].astype(str).str.upper().str.contains("HVC", na=False)
     else:
@@ -1041,7 +1104,7 @@ def extract_hvc_low_balance_from_tx(
     keep_ref = ["msisdn_clean", "oos_target", "day_target"]
     for c in ["full_name", "profile", "zone", "territory", "cluster", "quartier", "site_key",
               "segment_group", "Zone", "Territory", "Cluster"]:
-        if c in ref_hvc.columns:
+        if c in ref_hvc.columns and c not in keep_ref:
             keep_ref.append(c)
     ref_hvc = ref_hvc[keep_ref].drop_duplicates("msisdn_clean")
 
@@ -1053,36 +1116,54 @@ def extract_hvc_low_balance_from_tx(
         how="inner",
     )
     if joined.empty:
-        return pd.DataFrame()
+        return (pd.DataFrame(), diag) if return_diagnostics else pd.DataFrame()
+
+    diag["hvc_tx"] = len(joined)
+    diag["unique_hvc"] = int(joined["From_clean"].nunique())
 
     # Dernière transaction par POS (From)
     joined = joined.sort_values("Date")
     last = joined.groupby("From_clean", as_index=False).last()
 
-    # Balance < oos_target
-    last = last[last["Balance"].notna() & last["oos_target"].notna()]
-    last = last[last["Balance"] < last["oos_target"]].copy()
+    diag["hvc_with_target"] = int((last["oos_target"] > 0).sum())
+    diag["min_balance"] = float(last["Balance"].min()) if not last["Balance"].dropna().empty else None
+    diag["max_balance"] = float(last["Balance"].max()) if not last["Balance"].dropna().empty else None
 
-    if last.empty:
-        return pd.DataFrame()
+    # Garder un échantillon des POS HVC analysés pour le diagnostic utilisateur
+    sample_cols = [c for c in ["From_clean", "full_name", "Balance", "oos_target", "day_target", "Date"] if c in last.columns]
+    diag["sample_matched"] = last[sample_cols].head(8).to_dict(orient="records")
+
+    # Détection de rupture (OOS) :
+    # 1. Soit solde <= 0 (rupture totale)
+    # 2. Soit oos_target > 0 et Balance < oos_target (sous seuil)
+    is_oos_mask = (last["Balance"].fillna(0) <= 0) | (
+        (last["oos_target"] > 0) & (last["Balance"] < last["oos_target"])
+    )
+    oos_pos = last[is_oos_mask].copy()
+
+    diag["oos_count"] = len(oos_pos)
+
+    if oos_pos.empty:
+        return (pd.DataFrame(), diag) if return_diagnostics else pd.DataFrame()
 
     # Format type listing_oos
     result = pd.DataFrame({
-        "msisdn": last["From_clean"],
-        "full_name": last.get("full_name", last.get("profile", "N/A")),
-        "float_amount": last["Balance"].round(0).astype(int),
-        "day_target": last["day_target"].round(0).astype(int),
-        "oos_pct": last["oos_target"].round(0).astype(int),
-        "last_trx_time": last["Date"],
-        "zone": last.get("zone", last.get("Zone", "N/A")),
-        "territory": last.get("territory", last.get("Territory", "N/A")),
-        "cluster": last.get("cluster", last.get("Cluster", last.get("quartier", "N/A"))),
-        "site_key": last["site_key"].values if "site_key" in last.columns else None,
-        "segment_group": last.get("segment_group", "1-HVC"),
+        "msisdn": oos_pos["From_clean"],
+        "full_name": oos_pos.get("full_name", oos_pos.get("profile", "N/A")),
+        "float_amount": oos_pos["Balance"].fillna(0).round(0).astype(int),
+        "day_target": oos_pos["day_target"].fillna(0).round(0).astype(int),
+        "oos_pct": oos_pos["oos_target"].fillna(0).round(0).astype(int),
+        "last_trx_time": oos_pos["Date"],
+        "zone": oos_pos.get("zone", oos_pos.get("Zone", "N/A")),
+        "territory": oos_pos.get("territory", oos_pos.get("Territory", "N/A")),
+        "cluster": oos_pos.get("cluster", oos_pos.get("Cluster", oos_pos.get("quartier", "N/A"))),
+        "site_key": oos_pos["site_key"].values if "site_key" in oos_pos.columns else None,
+        "segment_group": oos_pos.get("segment_group", "1-HVC"),
         "source": "transactions_upload",
     })
 
-    return result.reset_index(drop=True)
+    final_df = result.reset_index(drop=True)
+    return (final_df, diag) if return_diagnostics else final_df
 
 
 def inject_into_listing_oos(pos_df: pd.DataFrame, snapshot_ts: Optional[datetime] = None) -> int:

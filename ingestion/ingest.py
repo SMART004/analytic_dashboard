@@ -205,8 +205,8 @@ def ingest_referentiel_pos(conn: sqlite3.Connection):
                 secteur_cluster=COALESCE(excluded.secteur_cluster, referentiel_pos.secteur_cluster),
                 site_key=COALESCE(excluded.site_key, referentiel_pos.site_key),
                 segment_group=COALESCE(excluded.segment_group, referentiel_pos.segment_group),
-                day_target=COALESCE(excluded.day_target, referentiel_pos.day_target),
-                oos_target=COALESCE(excluded.oos_target, referentiel_pos.oos_target)
+                day_target=COALESCE(NULLIF(excluded.day_target, 0.0), referentiel_pos.day_target),
+                oos_target=COALESCE(NULLIF(excluded.oos_target, 0.0), referentiel_pos.oos_target)
         """
         sql_site_ignore = "INSERT OR IGNORE INTO sites (site_key, sitename) VALUES (?, ?)"
         rows_pos = []
@@ -242,8 +242,23 @@ def ingest_referentiel_pos(conn: sqlite3.Connection):
             cursor.executemany(sql_pos, rows_pos)
             total_inserted += len(rows_pos)
 
+    # Auto-application des cibles POS si le fichier existe
+    try:
+        targets_df = load_setting("pos_targets")
+        if targets_df is not None and not targets_df.empty:
+            update_pos_targets_from_file(targets_df, conn=conn)
+    except Exception as e:
+        logger.warning(f"Auto-application pos_targets impossible: {e}")
+
     conn.commit()
     logger.info(f"Ingested {total_inserted} POS/agents into referentiel_pos.")
+
+
+def ingest_pos_targets(conn: sqlite3.Connection):
+    """Met à jour oos_target et day_target depuis le paramétrage 'pos_targets'."""
+    df = load_setting("pos_targets")
+    if df is not None and not df.empty:
+        update_pos_targets_from_file(df, conn=conn)
 
 
 def ingest_referentiel_commerciaux(conn: sqlite3.Connection):
@@ -976,6 +991,7 @@ def run_referentiel_ingestion(
         ingest_referentiel_pos(conn)
         if progress_callback:
             progress_callback(40, "Référentiel POS synchronisé")
+        ingest_pos_targets(conn)
         ingest_referentiel_commerciaux(conn)
         if progress_callback:
             progress_callback(50, "Commerciaux synchronisés")
@@ -996,6 +1012,7 @@ def run_referentiel_ingestion(
     stages = [
         ("sites", ingest_sites),
         ("referentiel_pos", ingest_referentiel_pos),
+        ("pos_targets", ingest_pos_targets),
         ("referentiel_commerciaux", ingest_referentiel_commerciaux),
         ("exclusions_reference", ingest_exclusions),
         ("cds_referentiel", ingest_cds_referentiel),

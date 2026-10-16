@@ -305,47 +305,140 @@ def _render_tx_to_oos_tab() -> None:
     )
 
     if not files:
+        # Nettoyer l'état si l'utilisateur retire les fichiers
+        if "last_tx_oos_result" in st.session_state:
+            del st.session_state["last_tx_oos_result"]
         st.info("Chargez un ou plusieurs fichiers de transactions.")
         return
+
+    c_btn1, c_btn2 = st.columns([3, 1])
+    with c_btn2:
+        if st.button("🔄 Réanalyser les fichiers", key="btn_reprocess_tx"):
+            st.session_state["last_processed_tx_files"] = []
+            st.session_state.pop("last_tx_oos_result", None)
+            st.rerun()
 
     tx_keys = [f"tx_{f.name}_{f.size}" for f in files]
     last_tx_keys = st.session_state.get("last_processed_tx_files", [])
     new_tx_files = [f for f, k in zip(files, tx_keys) if k not in last_tx_keys]
 
     if new_tx_files:
-        with st.spinner("Traitement et injection automatique en mémoire (Polars)…"):
+        with st.spinner("Traitement des transactions et analyse des ruptures HVC…"):
             try:
                 tx_df = read_tx_files(new_tx_files)
                 if tx_df.empty:
-                    st.warning("Aucun fichier valide.")
+                    st.warning("Aucune transaction valide trouvée dans les fichiers chargés.")
+                    st.session_state["last_processed_tx_files"] = list(set(last_tx_keys + tx_keys))
                     return
 
                 ref_df = get_all_pos()
                 if ref_df is None or ref_df.empty:
-                    st.error("Référentiel POS vide. Chargez-le dans Settings.")
+                    st.error("Référentiel POS vide. Chargez-le dans Paramètres.")
                     return
 
-                pos_oos = extract_hvc_low_balance_from_tx(tx_df, ref_df)
+                pos_oos, diag = extract_hvc_low_balance_from_tx(tx_df, ref_df, return_diagnostics=True)
+                snapshot_ts = datetime.now()
 
                 if pos_oos.empty:
-                    st.warning("Aucun HVC avec Balance < oos_target trouvé.")
+                    st.session_state["last_tx_oos_result"] = {
+                        "status": "empty",
+                        "snapshot_ts": snapshot_ts,
+                        "diag": diag,
+                        "files_count": len(files),
+                    }
                     st.session_state["last_processed_tx_files"] = list(set(last_tx_keys + tx_keys))
-                    return
-
-                snapshot_ts = datetime.now()
-                n = inject_into_listing_oos(pos_oos, snapshot_ts=snapshot_ts)
-                st.session_state["last_processed_tx_files"] = list(set(last_tx_keys + tx_keys))
-                st.cache_data.clear()
-
-                st.success(
-                    f"✅ {n} POS identifiés et ajoutés automatiquement au listing OOS "
-                    f"(snapshot : {snapshot_ts.strftime('%Y-%m-%d %H:%M')})."
-                )
-                st.dataframe(pos_oos, use_container_width=True, height=350)
-                st.rerun()
+                else:
+                    n = inject_into_listing_oos(pos_oos, snapshot_ts=snapshot_ts)
+                    st.session_state["last_processed_tx_files"] = list(set(last_tx_keys + tx_keys))
+                    st.cache_data.clear()
+                    st.session_state["last_tx_oos_result"] = {
+                        "status": "success",
+                        "snapshot_ts": snapshot_ts,
+                        "count": n,
+                        "df": pos_oos,
+                        "diag": diag,
+                        "files_count": len(files),
+                    }
 
             except Exception as e:
-                st.error(f"Erreur d'injection : {e}")
+                st.session_state["last_tx_oos_result"] = {
+                    "status": "error",
+                    "error": str(e),
+                }
+
+    # Affichage du résultat persistant
+    result = st.session_state.get("last_tx_oos_result")
+    if result:
+        status = result.get("status")
+        if status == "error":
+            st.error(f"❌ Erreur lors du traitement : {result.get('error')}")
+        elif status == "empty":
+            diag = result.get("diag", {})
+            st.info(
+                f"ℹ️ **Analyse terminée ({result.get('files_count', 1)} fichier(s)) : Aucun POS HVC en rupture sous cible.**"
+            )
+
+            # Métriques de diagnostic
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            with kpi1:
+                st.metric("Transactions lues", f"{diag.get('total_tx', 0):,}".replace(",", " "))
+            with kpi2:
+                st.metric("POS HVC identifiés", f"{diag.get('unique_hvc', 0)}")
+            with kpi3:
+                st.metric("HVC avec Cible OOS", f"{diag.get('hvc_with_target', 0)}")
+            with kpi4:
+                min_b = diag.get("min_balance")
+                st.metric("Solde Min HVC", f"{min_b:,.0f} FCFA".replace(",", " ") if min_b is not None else "N/A")
+
+            # Explications
+            if diag.get("unique_hvc", 0) == 0:
+                st.warning("⚠️ Aucun émetteur ('From') des transactions ne correspond à un POS identifié comme HVC dans le référentiel.")
+            elif diag.get("hvc_with_target", 0) == 0:
+                st.warning("⚠️ Les POS HVC trouvés n'ont pas d'objectif OOS configuré (oos_target = 0). Veuillez charger le fichier des cibles dans Paramètres.")
+            else:
+                st.success("✅ Tous les POS HVC identifiés dans ces transactions possèdent un solde supérieur à leur seuil d'alerte OOS.")
+
+            sample = diag.get("sample_matched", [])
+            if sample:
+                with st.expander("🔍 Voir les POS HVC analysés et leurs soldes constatés"):
+                    sample_df = pd.DataFrame(sample)
+                    st.dataframe(sample_df, use_container_width=True)
+
+        elif status == "success":
+            diag = result.get("diag", {})
+            snapshot_str = result["snapshot_ts"].strftime("%Y-%m-%d %H:%M:%S")
+            n = result.get("count", 0)
+            df = result.get("df", pd.DataFrame())
+
+            st.success(
+                f"✅ **{n} POS HVC en rupture détectés et ajoutés au listing OOS** "
+                f"(snapshot : {snapshot_str})."
+            )
+
+            # Métriques
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            with kpi1:
+                st.metric("Transactions lues", f"{diag.get('total_tx', 0):,}".replace(",", " "))
+            with kpi2:
+                st.metric("POS HVC analysés", f"{diag.get('unique_hvc', 0)}")
+            with kpi3:
+                st.metric("POS HVC en rupture", f"{n}")
+            with kpi4:
+                pct = (n / diag.get('unique_hvc', 1) * 100) if diag.get('unique_hvc', 0) > 0 else 0
+                st.metric("Taux de rupture HVC", f"{pct:.1f}%")
+
+            # Tableau
+            st.dataframe(df, use_container_width=True, height=350)
+
+            # Bouton de téléchargement
+            csv_data = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Télécharger la liste des POS en rupture (CSV)",
+                data=csv_data,
+                file_name=f"hvc_oos_{result['snapshot_ts'].strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key="btn_download_tx_oos",
+            )
 
 def render_reset_oos_button():
     st.warning("⚠️ Zone de danger")

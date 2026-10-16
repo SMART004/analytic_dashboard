@@ -199,6 +199,12 @@ def build_performance_context(
         table["POS_Touches"] = 0
         table["POS_Attribues"] = 0
         table["Taux_Couverture"] = 0.0
+        table["POS_Touches_HVC"] = 0
+        table["POS_Attribues_HVC"] = 0
+        table["Taux_Couverture_HVC"] = 0.0
+        table["POS_Touches_Others"] = 0
+        table["POS_Attribues_Others"] = 0
+        table["Taux_Couverture_Others"] = 0.0
         table["Taux_Persistance"] = None
 
         cov = compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date)
@@ -265,7 +271,8 @@ def build_performance_context(
             ).fillna(table["Actor_MSISDN"].map(assigned_map)).fillna(0).astype(int)
     elif segment == "commercial":
         coverage = _compute_commercial_coverage(
-            tx, filters.start_date, filters.end_date, manual_mapping=manual_mapping
+            tx, filters.start_date, filters.end_date, manual_mapping=manual_mapping,
+            hvc_set=hvc_set, others_set=others_set
         )
         table = table.merge(coverage, on="Actor_MSISDN", how="left")
     else:
@@ -276,18 +283,21 @@ def build_performance_context(
     numeric_cols = [
         "Nb_Jours", "FD_HVC", "HVC_Serve", "Nb_Trans_HVC", "FD_Others",
         "Other_Serve", "Nb_Trans_Other", "Hors_Portefeuille_POS",
-        "FD_Hors_Portefeuille", "POS_Touches", "POS_Attribues", "Dotation_Montant",
-        "FU",
+        "FD_Hors_Portefeuille", "POS_Touches", "POS_Attribues",
+        "POS_Touches_HVC", "POS_Attribues_HVC",
+        "POS_Touches_Others", "POS_Attribues_Others",
+        "Dotation_Montant", "FU",
     ]
     for col in numeric_cols:
         if col not in table.columns:
             table[col] = 0
         table[col] = pd.to_numeric(table[col], errors="coerce").fillna(0)
 
-    if "Taux_Couverture" not in table.columns:
-        table["Taux_Couverture"] = 0.0
-    else:
-        table["Taux_Couverture"] = pd.to_numeric(table["Taux_Couverture"], errors="coerce").fillna(0.0)
+    for rate_col in ["Taux_Couverture", "Taux_Couverture_HVC", "Taux_Couverture_Others"]:
+        if rate_col not in table.columns:
+            table[rate_col] = 0.0
+        else:
+            table[rate_col] = pd.to_numeric(table[rate_col], errors="coerce").fillna(0.0)
 
     if segment == "pr_caisse":
         table["Sigma_FD"] = pd.to_numeric(table["FD_HVC"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Others"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Hors_Portefeuille"], errors="coerce").fillna(0).astype(int)
@@ -681,11 +691,22 @@ def _compute_commercial_coverage(
     start_date: Optional[str],
     end_date: Optional[str],
     manual_mapping: Optional[pd.DataFrame] = None,
+    hvc_set: Optional[set[str]] = None,
+    others_set: Optional[set[str]] = None,
 ) -> pd.DataFrame:
-    """Calcule POS_Touches, POS_Attribues, Taux_Couverture et Taux_Persistance pour les commerciaux.
+    """Calcule POS_Touches, POS_Attribues, Taux_Couverture, et les métriques de couverture
+    HVC et Autres(MVC/LVC), ainsi que Taux_Persistance pour les commerciaux.
     - Si manual_mapping est fourni : utilise les POS attribués définis dans le fichier de mapping.
     - Sinon (mode auto) : attribution automatique basée sur transactions >= 3 TX (comme conquete_view).
     """
+    if hvc_set is None:
+        hvc_set = get_hvc_msisdns()
+    if others_set is None:
+        others_set = get_mvc_lvc_msisdns()
+
+    clean_hvc_set = {clean_phone(x) for x in hvc_set if x}
+    clean_others_set = {clean_phone(x) for x in others_set if x}
+
     base_cov = compute_coverage_persistence(tx, "commercial", start_date, end_date)
     persistence_map = (
         dict(zip(base_cov["Actor_MSISDN"], base_cov["Taux_Persistance"]))
@@ -694,6 +715,11 @@ def _compute_commercial_coverage(
     )
 
     if tx.empty:
+        for c in [
+            "POS_Touches_HVC", "POS_Attribues_HVC", "Taux_Couverture_HVC",
+            "POS_Touches_Others", "POS_Attribues_Others", "Taux_Couverture_Others"
+        ]:
+            base_cov[c] = 0
         return base_cov
 
     rows = []
@@ -701,9 +727,9 @@ def _compute_commercial_coverage(
 
     if has_manual:
         mapping_df = manual_mapping.copy()
-        mapping_df["_clean_pos"] = mapping_df["To_clean"].fillna("").astype(str).str.strip()
+        mapping_df["_clean_pos"] = mapping_df["To_clean"].fillna("").astype(str).str.strip().map(clean_phone)
         mapping_df["_clean_msisdn"] = (
-            mapping_df["Commercial_MSISDN"].fillna("").astype(str).str.strip()
+            mapping_df["Commercial_MSISDN"].fillna("").astype(str).str.strip().map(clean_phone)
             if "Commercial_MSISDN" in mapping_df.columns
             else pd.Series("", index=mapping_df.index)
         )
@@ -733,21 +759,50 @@ def _compute_commercial_coverage(
                 mask = mask | (mapping_df["_clean_nom"] == comm_nom)
 
             assigned_pos = set(mapping_df.loc[mask, "_clean_pos"].dropna())
+            assigned_pos = {p for p in assigned_pos if p}
             n_attribues = len(assigned_pos)
+
+            assigned_hvc = {p for p in assigned_pos if p in clean_hvc_set}
+            assigned_others = assigned_pos - assigned_hvc
+            n_attribues_hvc = len(assigned_hvc)
+            n_attribues_others = len(assigned_others)
 
             if n_attribues > 0:
                 touched_assigned = set(tx_comm["To_clean"].astype(str).dropna()).intersection(assigned_pos)
                 n_touches = len(touched_assigned)
                 taux = round(n_touches / n_attribues * 100, 1)
+
+                touched_hvc = touched_assigned.intersection(assigned_hvc)
+                n_touches_hvc = len(touched_hvc)
+                taux_hvc = round(n_touches_hvc / n_attribues_hvc * 100, 1) if n_attribues_hvc > 0 else 0.0
+
+                touched_others = touched_assigned.intersection(assigned_others)
+                n_touches_others = len(touched_others)
+                taux_others = round(n_touches_others / n_attribues_others * 100, 1) if n_attribues_others > 0 else 0.0
             else:
-                n_touches = tx_comm["To_clean"].nunique()
+                touched_all = set(tx_comm["To_clean"].astype(str).dropna())
+                n_touches = len(touched_all)
                 taux = 0.0
+
+                touched_hvc = touched_all.intersection(clean_hvc_set)
+                n_touches_hvc = len(touched_hvc)
+                taux_hvc = 0.0
+
+                touched_others = touched_all - touched_hvc
+                n_touches_others = len(touched_others)
+                taux_others = 0.0
 
             rows.append({
                 "Actor_MSISDN": msisdn,
                 "POS_Touches": n_touches,
                 "POS_Attribues": n_attribues,
                 "Taux_Couverture": taux,
+                "POS_Touches_HVC": n_touches_hvc,
+                "POS_Attribues_HVC": n_attribues_hvc,
+                "Taux_Couverture_HVC": taux_hvc,
+                "POS_Touches_Others": n_touches_others,
+                "POS_Attribues_Others": n_attribues_others,
+                "Taux_Couverture_Others": taux_others,
                 "Taux_Persistance": persistence_map.get(msisdn),
             })
     else:
@@ -765,22 +820,54 @@ def _compute_commercial_coverage(
         for msisdn in tx["Actor_MSISDN"].dropna().unique():
             tx_comm = tx[tx["Actor_MSISDN"] == msisdn]
             assigned_pos = set(assigned_auto[assigned_auto["Actor_MSISDN"] == msisdn]["To_clean"].astype(str))
+            assigned_pos = {p for p in assigned_pos if p}
             n_attribues = len(assigned_pos)
+
+            assigned_hvc = {p for p in assigned_pos if p in clean_hvc_set}
+            assigned_others = assigned_pos - assigned_hvc
+            n_attribues_hvc = len(assigned_hvc)
+            n_attribues_others = len(assigned_others)
 
             if n_attribues > 0:
                 touched_assigned = set(tx_comm["To_clean"].astype(str).dropna()).intersection(assigned_pos)
                 n_touches = len(touched_assigned)
                 taux = round(n_touches / n_attribues * 100, 1)
+
+                touched_hvc = touched_assigned.intersection(assigned_hvc)
+                n_touches_hvc = len(touched_hvc)
+                taux_hvc = round(n_touches_hvc / n_attribues_hvc * 100, 1) if n_attribues_hvc > 0 else 0.0
+
+                touched_others = touched_assigned.intersection(assigned_others)
+                n_touches_others = len(touched_others)
+                taux_others = round(n_touches_others / n_attribues_others * 100, 1) if n_attribues_others > 0 else 0.0
             else:
-                n_touches = tx_comm["To_clean"].nunique()
+                touched_all = set(tx_comm["To_clean"].astype(str).dropna())
+                touched_hvc = touched_all.intersection(clean_hvc_set)
+                touched_others = touched_all - touched_hvc
+
+                n_touches = len(touched_all)
                 n_attribues = n_touches
                 taux = 100.0 if n_touches > 0 else 0.0
+
+                n_touches_hvc = len(touched_hvc)
+                n_attribues_hvc = n_touches_hvc
+                taux_hvc = 100.0 if n_touches_hvc > 0 else 0.0
+
+                n_touches_others = len(touched_others)
+                n_attribues_others = n_touches_others
+                taux_others = 100.0 if n_touches_others > 0 else 0.0
 
             rows.append({
                 "Actor_MSISDN": msisdn,
                 "POS_Touches": n_touches,
                 "POS_Attribues": n_attribues,
                 "Taux_Couverture": taux,
+                "POS_Touches_HVC": n_touches_hvc,
+                "POS_Attribues_HVC": n_attribues_hvc,
+                "Taux_Couverture_HVC": taux_hvc,
+                "POS_Touches_Others": n_touches_others,
+                "POS_Attribues_Others": n_attribues_others,
+                "Taux_Couverture_Others": taux_others,
                 "Taux_Persistance": persistence_map.get(msisdn),
             })
 

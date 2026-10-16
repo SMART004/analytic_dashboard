@@ -418,6 +418,8 @@ def _build_commercial_display(table: pd.DataFrame) -> pd.DataFrame:
         "POS_Attribues": _to_int(_col(df, "POS_Attribues", 0)),
         "POS_Touches": _to_int(_col(df, "POS_Touches", 0)),
         "Taux_Couverture (%)": _to_num(_col(df, "Taux_Couverture", 0)),
+        "Taux_Couverture_HVC (%)": _to_num(_col(df, "Taux_Couverture_HVC", 0)),
+        "Taux_Couverture_Autres(MVC/LVC) (%)": _to_num(_col(df, "Taux_Couverture_Others", 0)),
         "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
         "TR_General (%)": _to_num(_col(df, "TR_General", 0)),
     })
@@ -536,9 +538,13 @@ def _append_total_row(
     total: dict[str, Any] = {col: "" for col in display_df.columns}
     total[label_col] = "TOTAL"
 
-    tr_cols = {"TR_HVC (%)", "TR_Other (%)", "TR_General (%)"}
+    rate_cols = {
+        "TR_HVC (%)", "TR_Other (%)", "TR_General (%)",
+        "Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)",
+        "Taux_Persistance (%)"
+    }
     for col in display_df.select_dtypes(include="number").columns:
-        if col == "Taux_Persistance (%)" or col in tr_cols:
+        if col in rate_cols:
             total[col] = None
             continue
         total[col] = display_df[col].sum()
@@ -616,11 +622,37 @@ def _append_total_row(
 
                     total[tpw_col] = f"{int(tot_hvc)} | {tr_hvc_tot:.1f}% | {int(tot_other)} | {tr_other_tot:.1f}%"
 
+        # 5. Couverture HVC & Autres
+        if "Taux_Couverture_HVC (%)" in display_df.columns:
+            if table is not None and "POS_Attribues_HVC" in table.columns and "POS_Touches_HVC" in table.columns:
+                tot_attr_hvc = pd.to_numeric(table["POS_Attribues_HVC"], errors="coerce").fillna(0).sum()
+                tot_touch_hvc = pd.to_numeric(table["POS_Touches_HVC"], errors="coerce").fillna(0).sum()
+                total["Taux_Couverture_HVC (%)"] = round(tot_touch_hvc / tot_attr_hvc * 100, 1) if tot_attr_hvc > 0 else 0.0
+            else:
+                total["Taux_Couverture_HVC (%)"] = round(display_df["Taux_Couverture_HVC (%)"].mean(), 1) if not display_df.empty else 0.0
+
+        if "Taux_Couverture_Autres(MVC/LVC) (%)" in display_df.columns:
+            if table is not None and "POS_Attribues_Others" in table.columns and "POS_Touches_Others" in table.columns:
+                tot_attr_oth = pd.to_numeric(table["POS_Attribues_Others"], errors="coerce").fillna(0).sum()
+                tot_touch_oth = pd.to_numeric(table["POS_Touches_Others"], errors="coerce").fillna(0).sum()
+                total["Taux_Couverture_Autres(MVC/LVC) (%)"] = round(tot_touch_oth / tot_attr_oth * 100, 1) if tot_attr_oth > 0 else 0.0
+            else:
+                total["Taux_Couverture_Autres(MVC/LVC) (%)"] = round(display_df["Taux_Couverture_Autres(MVC/LVC) (%)"].mean(), 1) if not display_df.empty else 0.0
+
     if "Taux_Couverture (%)" in total and "POS_Attribues" in total:
         total["Taux_Couverture (%)"] = (
             round(total["POS_Touches"] / total["POS_Attribues"] * 100, 1)
             if total["POS_Attribues"] else 0.0
         )
+
+    # Moyenne des heures pour la ligne TOTAL
+    for hour_col in ["Heure_Dotation", "Premiere_Trans", "Derniere_Trans"]:
+        if hour_col in display_df.columns:
+            valid_mins = display_df[hour_col].apply(_time_str_to_minutes).dropna()
+            if not valid_mins.empty:
+                total[hour_col] = _minutes_to_time(valid_mins.mean())
+            else:
+                total[hour_col] = "N/A"
 
     if segment == "cds" and "HVC_Serve" in total and "Nb_HVC_Attribue" in total:
         total_serve, total_quota = total["HVC_Serve"], total["Nb_HVC_Attribue"]
@@ -666,6 +698,8 @@ def _time_str_to_minutes(value: Any) -> Optional[int]:
 def _heure_debut_rule(value: Any, row: pd.Series, col: Any) -> Optional[dict[str, Any]]:
     if col not in ("Heure_Dotation", "Premiere_Trans"):
         return None
+    if _total_row_match(row):
+        return None
     minutes = _time_str_to_minutes(value)
     if minutes is None:
         return None
@@ -678,6 +712,8 @@ def _heure_debut_rule(value: Any, row: pd.Series, col: Any) -> Optional[dict[str
 
 def _heure_fin_rule(value: Any, row: pd.Series, col: Any) -> Optional[dict[str, Any]]:
     if col != "Derniere_Trans":
+        return None
+    if _total_row_match(row):
         return None
     minutes = _time_str_to_minutes(value)
     if minutes is None:
@@ -711,9 +747,9 @@ def _commercial_styles() -> dict[str, Any]:
             {"columns": ["Σ_POS_Serve"], "op": "<", "value": 20, "style": {"fill": "#ffd6d6"}},
             {"columns": ["Σ_POS_Serve"], "op": "between", "value": (20, 39), "style": {"fill": "#fff3bf"}},
             {"columns": ["Σ_POS_Serve"], "op": ">=", "value": 40, "style": {"fill": "#d8f3dc"}},
-            {"columns": ["Taux_Couverture (%)"], "op": "<", "value": 70, "style": {"fill": "#ffd6d6"}},
-            {"columns": ["Taux_Couverture (%)"], "op": "between", "value": (70, 89.999), "style": {"fill": "#fff3bf"}},
-            {"columns": ["Taux_Couverture (%)"], "op": ">=", "value": 90, "style": {"fill": "#d8f3dc"}},
+            {"columns": ["Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)"], "op": "<", "value": 70, "style": {"fill": "#ffd6d6"}},
+            {"columns": ["Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)"], "op": "between", "value": (70, 89.999), "style": {"fill": "#fff3bf"}},
+            {"columns": ["Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)"], "op": ">=", "value": 90, "style": {"fill": "#d8f3dc"}},
         ],
     }
 
