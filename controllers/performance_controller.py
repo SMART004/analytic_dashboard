@@ -78,6 +78,7 @@ from models.performance_model import (
     get_cds_commercial_flows,
     get_commercial_referentiel,
     get_dotation_transactions,
+    get_float_up_transactions,
     get_hvc_msisdns,
     get_hvc_quota_by_cds,
     get_hvc_cds_assignments,
@@ -141,6 +142,7 @@ class PerformanceFilters:
     zone_sa: str = "Toutes"            # commercial uniquement
     type_point: str = "Tous"           # pr_caisse uniquement (Point Relais / Caisses)
     territoire: str = "Toutes"         # pr_caisse uniquement
+    mapping_hash: Optional[str] = None # Hash du fichier de mapping manuel si fourni
 
 
 @dataclass(frozen=True)
@@ -165,8 +167,18 @@ def load_filter_options(segment: Segment) -> dict[str, Any]:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def build_performance_context(filters: PerformanceFilters) -> PerformanceContext:
+def build_performance_context(
+    filters: PerformanceFilters,
+    manual_mapping: Optional[pd.DataFrame] = None,
+) -> PerformanceContext:
     segment = filters.segment
+    if manual_mapping is None:
+        try:
+            import streamlit as st
+            manual_mapping = st.session_state.get("perf_commercial_manual_mapping")
+        except Exception:
+            manual_mapping = None
+
     try:
         excluded = get_excluded_msisdns()
         actor_pool = _load_actor_pool(filters)
@@ -183,10 +195,19 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
         table = actor_pool.copy()
         for col in base_cols:
             table[col] = 0
-        table = table.merge(
-            compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date),
-            on="Actor_MSISDN", how="left",
-        )
+        table["FU"] = 0
+        table["POS_Touches"] = 0
+        table["POS_Attribues"] = 0
+        table["Taux_Couverture"] = 0.0
+        table["Taux_Persistance"] = None
+
+        cov = compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date)
+        if not cov.empty and "Actor_MSISDN" in cov.columns:
+            if "POS_Attribues" in cov.columns:
+                table["POS_Attribues"] = table["Actor_MSISDN"].map(cov.set_index("Actor_MSISDN")["POS_Attribues"]).fillna(0).astype(int)
+            if "Taux_Persistance" in cov.columns:
+                table["Taux_Persistance"] = table["Actor_MSISDN"].map(cov.set_index("Actor_MSISDN")["Taux_Persistance"])
+
         if segment == "pr_caisse" and "Type_Point" in table.columns:
             caisse_rows = table["Type_Point"].eq("Caisses")
             table.loc[caisse_rows, ["POS_Touches", "POS_Attribues", "Taux_Couverture"]] = 0
@@ -227,9 +248,11 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
                 hvc_others["FD_HVC"] = (hvc_others["FD_HVC"] - hvc_others["FD_Hors_Portefeuille"]).clip(lower=0)
 
     dotation = _compute_dotation(filters, actor_pool)
+    float_up = _compute_float_up(filters, actor_pool)
 
     table = actor_pool.merge(hvc_others, on="Actor_MSISDN", how="left")
     table = table.merge(dotation, on="Actor_MSISDN", how="left")
+    table = table.merge(float_up, on="Actor_MSISDN", how="left")
 
     if segment == "pr_caisse":
         assigned_only = compute_coverage_persistence(
@@ -240,6 +263,11 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
             table["POS_Attribues"] = pd.to_numeric(
                 table["POS_Attribues"], errors="coerce"
             ).fillna(table["Actor_MSISDN"].map(assigned_map)).fillna(0).astype(int)
+    elif segment == "commercial":
+        coverage = _compute_commercial_coverage(
+            tx, filters.start_date, filters.end_date, manual_mapping=manual_mapping
+        )
+        table = table.merge(coverage, on="Actor_MSISDN", how="left")
     else:
         # Calcul de Couverture et Persistance
         coverage = compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date)
@@ -249,11 +277,17 @@ def build_performance_context(filters: PerformanceFilters) -> PerformanceContext
         "Nb_Jours", "FD_HVC", "HVC_Serve", "Nb_Trans_HVC", "FD_Others",
         "Other_Serve", "Nb_Trans_Other", "Hors_Portefeuille_POS",
         "FD_Hors_Portefeuille", "POS_Touches", "POS_Attribues", "Dotation_Montant",
+        "FU",
     ]
     for col in numeric_cols:
         if col not in table.columns:
             table[col] = 0
         table[col] = pd.to_numeric(table[col], errors="coerce").fillna(0)
+
+    if "Taux_Couverture" not in table.columns:
+        table["Taux_Couverture"] = 0.0
+    else:
+        table["Taux_Couverture"] = pd.to_numeric(table["Taux_Couverture"], errors="coerce").fillna(0.0)
 
     if segment == "pr_caisse":
         table["Sigma_FD"] = pd.to_numeric(table["FD_HVC"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Others"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Hors_Portefeuille"], errors="coerce").fillna(0).astype(int)
@@ -570,6 +604,187 @@ def _compute_dotation(filters: PerformanceFilters, actor_pool: pd.DataFrame) -> 
         agg = principal.merge(amounts, on="Actor_MSISDN", how="left")
 
     return agg
+
+
+def _compute_float_up(filters: PerformanceFilters, actor_pool: pd.DataFrame) -> pd.DataFrame:
+    """Calcule le montant de Float Up (FU / retours de float) par acteur."""
+    fu_tx = get_float_up_transactions(
+        segment=filters.segment,
+        start_date=filters.start_date,
+        end_date=filters.end_date,
+        hour_start=filters.hour_start,
+        hour_end=filters.hour_end,
+    )
+    empty = pd.DataFrame(columns=["Actor_MSISDN", "FU"])
+    if fu_tx.empty:
+        return empty
+
+    agg = fu_tx.groupby("Actor_MSISDN")["Amount"].sum().reset_index(name="FU")
+    return agg
+
+
+def normalize_commercial_mapping(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise un fichier d'attribution POS <-> Commercial (Excel ou CSV).
+    Colonnes reconnues :
+    - POS : AGENT MSISDN, Agent_MSISDN, agent_msisdn, POS_MSISDN, MSISDN_POS, MSISDN, POS, Numero POS
+    - Commercial Nom : Commercial, COMMERCIAL, Nom_Ccial, NOM_CCIAL, Nom Commercial, Ccial, Nom
+    - Commercial Numéro : Numero, Numéro, NUMERO, MSISDN_Commercial, Ccial_MSISDN, CCIAL_MSISDN, Telephone
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["To_clean", "Commercial", "Commercial_MSISDN"])
+
+    work = df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+    lookup = {str(c).lower().replace(" ", "").replace("_", ""): c for c in work.columns}
+
+    def pick(*cands):
+        for c in cands:
+            k = c.lower().replace(" ", "").replace("_", "")
+            if k in lookup:
+                return lookup[k]
+        return None
+
+    col_pos = pick("AGENT MSISDN", "Agent_MSISDN", "agent_msisdn", "POS_MSISDN", "MSISDN_POS", "MSISDN", "POS", "Numero POS", "Numero_POS", "PDV")
+    col_name = pick("Commercial", "COMMERCIAL", "Nom_Ccial", "NOM_CCIAL", "Nom Commercial", "CCIAL", "Nom")
+    col_num = pick("Numero", "Numéro", "NUMERO", "MSISDN_Commercial", "Ccial_MSISDN", "CCIAL_MSISDN", "MSISDN_CCIAL", "Telephone")
+
+    if not col_pos or not col_name:
+        return pd.DataFrame()
+
+    out = pd.DataFrame({
+        "To_clean": work[col_pos].astype(str).apply(clean_phone),
+        "Commercial": work[col_name].astype(str).str.strip(),
+    })
+
+    if col_num:
+        out["Commercial_MSISDN"] = (
+            work[col_num]
+            .apply(lambda x: "" if pd.isna(x) else str(x).split(".")[0].strip())
+            .apply(clean_phone)
+        )
+    else:
+        out["Commercial_MSISDN"] = None
+
+    out = out[
+        out["To_clean"].notna()
+        & (out["To_clean"].astype(str).str.len() > 0)
+        & out["Commercial"].notna()
+        & ~out["Commercial"].str.lower().isin({"", "nan", "none", "n/a", "null"})
+    ].copy()
+
+    out = out.drop_duplicates(subset=["To_clean"], keep="first").reset_index(drop=True)
+    return out
+
+
+def _compute_commercial_coverage(
+    tx: pd.DataFrame,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    manual_mapping: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Calcule POS_Touches, POS_Attribues, Taux_Couverture et Taux_Persistance pour les commerciaux.
+    - Si manual_mapping est fourni : utilise les POS attribués définis dans le fichier de mapping.
+    - Sinon (mode auto) : attribution automatique basée sur transactions >= 3 TX (comme conquete_view).
+    """
+    base_cov = compute_coverage_persistence(tx, "commercial", start_date, end_date)
+    persistence_map = (
+        dict(zip(base_cov["Actor_MSISDN"], base_cov["Taux_Persistance"]))
+        if not base_cov.empty and "Taux_Persistance" in base_cov.columns
+        else {}
+    )
+
+    if tx.empty:
+        return base_cov
+
+    rows = []
+    has_manual = manual_mapping is not None and isinstance(manual_mapping, pd.DataFrame) and not manual_mapping.empty
+
+    if has_manual:
+        mapping_df = manual_mapping.copy()
+        mapping_df["_clean_pos"] = mapping_df["To_clean"].fillna("").astype(str).str.strip()
+        mapping_df["_clean_msisdn"] = (
+            mapping_df["Commercial_MSISDN"].fillna("").astype(str).str.strip()
+            if "Commercial_MSISDN" in mapping_df.columns
+            else pd.Series("", index=mapping_df.index)
+        )
+        mapping_df["_clean_nom"] = (
+            mapping_df["Commercial"].fillna("").astype(str).str.strip().str.upper()
+            if "Commercial" in mapping_df.columns
+            else pd.Series("", index=mapping_df.index)
+        )
+
+        for msisdn in tx["Actor_MSISDN"].dropna().unique():
+            tx_comm = tx[tx["Actor_MSISDN"] == msisdn]
+            comm_nom = (
+                str(tx_comm["Actor_Nom"].iloc[0]).strip().upper()
+                if "Actor_Nom" in tx_comm.columns and not tx_comm.empty and pd.notna(tx_comm["Actor_Nom"].iloc[0])
+                else ""
+            )
+
+            msisdn_9 = str(msisdn)[-9:]
+            def _match_msisdn(val: Any) -> bool:
+                s = str(val).strip() if pd.notna(val) else ""
+                if not s or s.lower() in ("nan", "none", ""):
+                    return False
+                return s[-9:] == msisdn_9 if len(s) >= 9 else s == str(msisdn)
+
+            mask = mapping_df["_clean_msisdn"].apply(_match_msisdn)
+            if comm_nom:
+                mask = mask | (mapping_df["_clean_nom"] == comm_nom)
+
+            assigned_pos = set(mapping_df.loc[mask, "_clean_pos"].dropna())
+            n_attribues = len(assigned_pos)
+
+            if n_attribues > 0:
+                touched_assigned = set(tx_comm["To_clean"].astype(str).dropna()).intersection(assigned_pos)
+                n_touches = len(touched_assigned)
+                taux = round(n_touches / n_attribues * 100, 1)
+            else:
+                n_touches = tx_comm["To_clean"].nunique()
+                taux = 0.0
+
+            rows.append({
+                "Actor_MSISDN": msisdn,
+                "POS_Touches": n_touches,
+                "POS_Attribues": n_attribues,
+                "Taux_Couverture": taux,
+                "Taux_Persistance": persistence_map.get(msisdn),
+            })
+    else:
+        # Mode Automatique : attribution primaire des POS avec >= 3 transactions
+        pairs = tx.groupby(["Actor_MSISDN", "To_clean"]).size().reset_index(name="tx_count")
+        if not pairs.empty:
+            assigned_auto = (
+                pairs[pairs["tx_count"] >= 3]
+                .sort_values(["To_clean", "tx_count"], ascending=[True, False])
+                .drop_duplicates(subset=["To_clean"], keep="first")
+            )
+        else:
+            assigned_auto = pd.DataFrame(columns=["Actor_MSISDN", "To_clean"])
+
+        for msisdn in tx["Actor_MSISDN"].dropna().unique():
+            tx_comm = tx[tx["Actor_MSISDN"] == msisdn]
+            assigned_pos = set(assigned_auto[assigned_auto["Actor_MSISDN"] == msisdn]["To_clean"].astype(str))
+            n_attribues = len(assigned_pos)
+
+            if n_attribues > 0:
+                touched_assigned = set(tx_comm["To_clean"].astype(str).dropna()).intersection(assigned_pos)
+                n_touches = len(touched_assigned)
+                taux = round(n_touches / n_attribues * 100, 1)
+            else:
+                n_touches = tx_comm["To_clean"].nunique()
+                n_attribues = n_touches
+                taux = 100.0 if n_touches > 0 else 0.0
+
+            rows.append({
+                "Actor_MSISDN": msisdn,
+                "POS_Touches": n_touches,
+                "POS_Attribues": n_attribues,
+                "Taux_Couverture": taux,
+                "Taux_Persistance": persistence_map.get(msisdn),
+            })
+
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------

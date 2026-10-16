@@ -42,6 +42,8 @@ est systématiquement présente.
 from __future__ import annotations
 
 from datetime import date
+from io import BytesIO
+import hashlib
 from typing import Any, Optional
 
 import numpy as np
@@ -54,6 +56,7 @@ from controllers.performance_controller import (
     PerformanceFilters,
     build_performance_context,
     load_filter_options,
+    normalize_commercial_mapping,
 )
 from ingestion.upload_sync import (
     Segment,
@@ -94,9 +97,86 @@ def render_performance_hub() -> None:
         _render_segment_tab("cds")
 
 
+SESSION_KEY_COMM_MAPPING = "perf_commercial_manual_mapping"
+SESSION_KEY_COMM_MAPPING_HASH = "perf_commercial_manual_mapping_hash"
+
+
+def _render_commercial_mapping_section() -> None:
+    """Permet d'importer un fichier d'attribution POS <-> Commercial pour le calcul du taux de couverture."""
+    manual_df = st.session_state.get(SESSION_KEY_COMM_MAPPING)
+    is_active = manual_df is not None and isinstance(manual_df, pd.DataFrame) and not manual_df.empty
+
+    expander_title = "📁 Attribution POS ↔ Commercial (Optionnel — Couverture)"
+    if is_active:
+        expander_title += f" [ACTIF : {len(manual_df)} POS]"
+
+    with st.expander(expander_title, expanded=is_active):
+        st.markdown(
+            "Importez ici un fichier Excel/CSV d'attribution des POS aux commerciaux (colonnes reconnues : "
+            "`AGENT MSISDN` / `POS`, `Commercial` / `Nom_Ccial`, et/ou `Numero` / `MSISDN_Commercial`). "
+            "**L'import n'est pas obligatoire** : si aucun fichier n'est chargé, l'attribution se fait automatiquement "
+            "sur la base des transactions (≥ 3 transactions)."
+        )
+
+        col_up, col_btn = st.columns([3, 1])
+        with col_up:
+            uploaded = st.file_uploader(
+                "Importer le fichier de mapping POS ↔ Commercial",
+                type=["xlsx", "xls", "csv"],
+                key="perf_comm_manual_mapping_file",
+                help="Associe chaque POS à son commercial pour calculer précisément POS attribués, POS touchés et Taux de couverture.",
+            )
+            if uploaded is not None:
+                content_bytes = uploaded.getvalue()
+                current_hash = hashlib.md5(content_bytes).hexdigest()
+                if st.session_state.get(SESSION_KEY_COMM_MAPPING_HASH) != current_hash:
+                    try:
+                        if uploaded.name.lower().endswith(".csv"):
+                            raw_df = pd.read_csv(BytesIO(content_bytes))
+                        else:
+                            raw_df = pd.read_excel(BytesIO(content_bytes))
+                        normalized = normalize_commercial_mapping(raw_df)
+                        if not normalized.empty:
+                            st.session_state[SESSION_KEY_COMM_MAPPING] = normalized
+                            st.session_state[SESSION_KEY_COMM_MAPPING_HASH] = current_hash
+                            st.success(
+                                f"✅ Mapping manuel chargé : {len(normalized)} POS attribués à "
+                                f"{normalized['Commercial'].nunique()} commerciaux."
+                            )
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Colonnes introuvables dans le fichier. Veuillez vérifier qu'il contient au moins "
+                                "une colonne pour les POS (ex: 'AGENT MSISDN') et une pour le commercial (ex: 'Commercial')."
+                            )
+                    except Exception as exc:
+                        st.error(f"Erreur de lecture du fichier de mapping : {exc}")
+
+        with col_btn:
+            st.write("")
+            st.write("")
+            if is_active:
+                if st.button("🔄 Réinitialiser (Mode Auto)", key="btn_reset_perf_comm_mapping"):
+                    st.session_state[SESSION_KEY_COMM_MAPPING] = None
+                    st.session_state[SESSION_KEY_COMM_MAPPING_HASH] = None
+                    st.rerun()
+
+        if is_active:
+            st.info(
+                f"ℹ️ **Mode mapping manuel actif** : {len(manual_df)} attributions chargées. "
+                "Le taux de couverture est calculé sur ce portefeuille."
+            )
+        else:
+            st.caption("ℹ️ **Mode automatique actif** : Attribution automatique calculée sur les transactions (≥ 3 TX).")
+
+
 def _render_segment_tab(segment: Segment) -> None:
     _render_upload_sync_section(segment)
     st.divider()
+
+    if segment == "commercial":
+        _render_commercial_mapping_section()
+        st.divider()
 
     filters = render_performance_filters(segment)
     context = _build_performance_context_cached(filters)
@@ -110,7 +190,8 @@ def _load_filter_options_cached(segment: Segment) -> dict[str, Any]:
 
 @st.cache_resource(show_spinner=False, ttl=120)
 def _build_performance_context_cached(filters: PerformanceFilters) -> PerformanceContext:
-    return build_performance_context(filters)
+    manual_mapping = st.session_state.get(SESSION_KEY_COMM_MAPPING) if filters.segment == "commercial" else None
+    return build_performance_context(filters, manual_mapping=manual_mapping)
 
 
 @st.cache_data(show_spinner=False)
@@ -239,6 +320,8 @@ def render_performance_filters(segment: str) -> PerformanceFilters:
             "Plage horaire", min_value=0, max_value=23, value=(0, 23), key=f"{prefix}_hour_filter"
         )
 
+    mapping_hash = st.session_state.get(SESSION_KEY_COMM_MAPPING_HASH) if segment == "commercial" else None
+
     return PerformanceFilters(
         segment=segment,
         start_date=start_date,
@@ -250,6 +333,7 @@ def render_performance_filters(segment: str) -> PerformanceFilters:
         zone_sa=zone_sa,
         type_point=type_point,
         territoire=territoire,
+        mapping_hash=mapping_hash,
     )
 
 
@@ -319,6 +403,7 @@ def _build_commercial_display(table: pd.DataFrame) -> pd.DataFrame:
         "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
         "Heure_Dotation": df["Heure_Dotation"],
         "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
+        "FU (Float Up)": _to_int(_col(df, "FU", 0)),
         "Premiere_Trans": df["Premiere_Trans"],
         "Derniere_Trans": df["Derniere_Trans"],
         "Nb_Transactions": _to_int(_col(df, "Nb_Transactions", 0)),
@@ -330,6 +415,9 @@ def _build_commercial_display(table: pd.DataFrame) -> pd.DataFrame:
         "TR_Other (%)": _to_num(_col(df, "TR_Other", 0)),
         "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
         "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        "POS_Attribues": _to_int(_col(df, "POS_Attribues", 0)),
+        "POS_Touches": _to_int(_col(df, "POS_Touches", 0)),
+        "Taux_Couverture (%)": _to_num(_col(df, "Taux_Couverture", 0)),
         "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
         "TR_General (%)": _to_num(_col(df, "TR_General", 0)),
     })
@@ -369,6 +457,7 @@ def _build_pr_caisse_display(table: pd.DataFrame, type_point: str = "Tous") -> p
         "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
         "Dotation_Nom": _col(df, "Dotation_Nom", ""),
         "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
+        "FU (Float Up)": _to_int(_col(df, "FU", 0)),
     })
 
     if type_point == "Caisses" or (not df.empty and "Type_Point" in df.columns and (df["Type_Point"] == "Caisses").all()):
@@ -400,6 +489,7 @@ def _build_cds_display(table: pd.DataFrame) -> pd.DataFrame:
         # cote controller (Bloquant 1), les afficher serait trompeur (0 partout).
         "Dotation_Nom": _col(df, "Dotation_Nom", ""),
         "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
+        "FU (Float Up)": _to_int(_col(df, "FU", 0)),
     })
     return display.sort_values(["CDS"]).reset_index(drop=True)
 
@@ -462,14 +552,14 @@ def _append_total_row(
             if table is not None and "Nb_Trans_HVC" in table.columns and "HVC_Serve" in table.columns:
                 nb_trans_hvc = pd.to_numeric(table["Nb_Trans_HVC"], errors="coerce").fillna(0).sum()
                 hvc_serve = pd.to_numeric(table["HVC_Serve"], errors="coerce").fillna(0)
-                nb_jours = pd.to_numeric(table.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                nb_jours = pd.to_numeric(_col(table, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
                 cible_hvc = (hvc_serve * nb_jours * 3).sum()
                 total["TR_HVC (%)"] = round((nb_trans_hvc / cible_hvc * 100), 1) if cible_hvc > 0 else 0.0
             else:
-                hvc_serve = pd.to_numeric(display_df.get("HVC_Serve", 0), errors="coerce").fillna(0)
-                nb_jours = pd.to_numeric(display_df.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                hvc_serve = pd.to_numeric(_col(display_df, "HVC_Serve", 0), errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(_col(display_df, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
                 cible_hvc = (hvc_serve * nb_jours * 3).sum()
-                tr_hvc_s = pd.to_numeric(display_df.get("TR_HVC (%)", 0), errors="coerce").fillna(0)
+                tr_hvc_s = pd.to_numeric(_col(display_df, "TR_HVC (%)", 0), errors="coerce").fillna(0)
                 nb_trans_hvc = (tr_hvc_s * hvc_serve * nb_jours * 3 / 100).sum()
                 total["TR_HVC (%)"] = round((nb_trans_hvc / cible_hvc * 100), 1) if cible_hvc > 0 else 0.0
 
@@ -478,14 +568,14 @@ def _append_total_row(
             if table is not None and "Nb_Trans_Other" in table.columns and "Other_Serve" in table.columns:
                 nb_trans_other = pd.to_numeric(table["Nb_Trans_Other"], errors="coerce").fillna(0).sum()
                 other_serve = pd.to_numeric(table["Other_Serve"], errors="coerce").fillna(0)
-                nb_jours = pd.to_numeric(table.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                nb_jours = pd.to_numeric(_col(table, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
                 cible_other = (other_serve * nb_jours * 3).sum()
                 total["TR_Other (%)"] = round((nb_trans_other / cible_other * 100), 1) if cible_other > 0 else 0.0
             else:
-                other_serve = pd.to_numeric(display_df.get("Other_Serve", 0), errors="coerce").fillna(0)
-                nb_jours = pd.to_numeric(display_df.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                other_serve = pd.to_numeric(_col(display_df, "Other_Serve", 0), errors="coerce").fillna(0)
+                nb_jours = pd.to_numeric(_col(display_df, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
                 cible_other = (other_serve * nb_jours * 3).sum()
-                tr_other_s = pd.to_numeric(display_df.get("TR_Other (%)", 0), errors="coerce").fillna(0)
+                tr_other_s = pd.to_numeric(_col(display_df, "TR_Other (%)", 0), errors="coerce").fillna(0)
                 nb_trans_other = (tr_other_s * other_serve * nb_jours * 3 / 100).sum()
                 total["TR_Other (%)"] = round((nb_trans_other / cible_other * 100), 1) if cible_other > 0 else 0.0
 
@@ -495,7 +585,7 @@ def _append_total_row(
             if pos_serve_col in display_df.columns and "Nb_Transactions" in display_df.columns:
                 nb_trans_gen = pd.to_numeric(display_df["Nb_Transactions"], errors="coerce").fillna(0).sum()
                 pos_serve = pd.to_numeric(display_df[pos_serve_col], errors="coerce").fillna(0)
-                nb_jours = pd.to_numeric(display_df.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                nb_jours = pd.to_numeric(_col(display_df, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
                 cible_gen = (pos_serve * nb_jours * 3).sum()
                 total["TR_General (%)"] = round((nb_trans_gen / cible_gen * 100), 1) if cible_gen > 0 else 0.0
 
@@ -506,15 +596,15 @@ def _append_total_row(
                 if tpw_col in display_df.columns:
                     serve_col, tr_col = f"HVC Serve {label}", f"TR_HVC {label}"
                     other_serve_col, other_tr_col = f"Other Serve {label}", f"TR_Other {label}"
-                    hvc_s = pd.to_numeric(table.get(serve_col, 0), errors="coerce").fillna(0)
-                    other_s = pd.to_numeric(table.get(other_serve_col, 0), errors="coerce").fillna(0)
-                    nb_j = pd.to_numeric(table.get("Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
+                    hvc_s = pd.to_numeric(_col(table, serve_col, 0), errors="coerce").fillna(0)
+                    other_s = pd.to_numeric(_col(table, other_serve_col, 0), errors="coerce").fillna(0)
+                    nb_j = pd.to_numeric(_col(table, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
 
                     tot_hvc = hvc_s.sum()
                     tot_other = other_s.sum()
 
-                    tr_hvc_s = pd.to_numeric(table.get(tr_col, 0), errors="coerce").fillna(0)
-                    tr_other_s = pd.to_numeric(table.get(other_tr_col, 0), errors="coerce").fillna(0)
+                    tr_hvc_s = pd.to_numeric(_col(table, tr_col, 0), errors="coerce").fillna(0)
+                    tr_other_s = pd.to_numeric(_col(table, other_tr_col, 0), errors="coerce").fillna(0)
 
                     cible_hvc_w = (hvc_s * nb_j * 3).sum()
                     trans_hvc_w = (tr_hvc_s * hvc_s * nb_j * 3 / 100).sum()
@@ -529,7 +619,7 @@ def _append_total_row(
     if "Taux_Couverture (%)" in total and "POS_Attribues" in total:
         total["Taux_Couverture (%)"] = (
             round(total["POS_Touches"] / total["POS_Attribues"] * 100, 1)
-            if total["POS_Attribues"] else None
+            if total["POS_Attribues"] else 0.0
         )
 
     if segment == "cds" and "HVC_Serve" in total and "Nb_HVC_Attribue" in total:
@@ -605,9 +695,12 @@ def _commercial_styles() -> dict[str, Any]:
         "total_row_match": _total_row_match,
         "formats": {
             "Dotation_Montant": "#,##0",
+            "FU (Float Up)": "#,##0",
             "FD_HVC": "#,##0",
             "FD_Others": "#,##0",
             "Σ_FD": "#,##0",
+            "POS_Attribues": "#,##0",
+            "POS_Touches": "#,##0",
         },
         "rules": [
             _heure_debut_rule,
@@ -618,6 +711,9 @@ def _commercial_styles() -> dict[str, Any]:
             {"columns": ["Σ_POS_Serve"], "op": "<", "value": 20, "style": {"fill": "#ffd6d6"}},
             {"columns": ["Σ_POS_Serve"], "op": "between", "value": (20, 39), "style": {"fill": "#fff3bf"}},
             {"columns": ["Σ_POS_Serve"], "op": ">=", "value": 40, "style": {"fill": "#d8f3dc"}},
+            {"columns": ["Taux_Couverture (%)"], "op": "<", "value": 70, "style": {"fill": "#ffd6d6"}},
+            {"columns": ["Taux_Couverture (%)"], "op": "between", "value": (70, 89.999), "style": {"fill": "#fff3bf"}},
+            {"columns": ["Taux_Couverture (%)"], "op": ">=", "value": 90, "style": {"fill": "#d8f3dc"}},
         ],
     }
 
@@ -632,6 +728,9 @@ def _pr_caisse_styles() -> dict[str, Any]:
             "FD_Others": "#,##0",
             "Σ_FD": "#,##0",
             "Dotation_Montant": "#,##0",
+            "FU (Float Up)": "#,##0",
+            "POS_Attribues": "#,##0",
+            "POS_Touches": "#,##0",
         },
     }
 
@@ -646,6 +745,7 @@ def _cds_styles() -> dict[str, Any]:
             "FD_Hors_Portefeuille_HVC": "#,##0",
             "Σ_FD": "#,##0",
             "Dotation_Montant": "#,##0",
+            "FU (Float Up)": "#,##0",
         },
     }
 

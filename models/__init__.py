@@ -26,6 +26,7 @@ from .performance_model import (
     get_hvc_cds_assignments,
     get_performance_transactions,
     get_dotation_transactions,
+    get_float_up_transactions,
     get_performance_filter_options,
 )
 from .conquete_model import (
@@ -62,6 +63,7 @@ __all__ = [
     "get_hvc_cds_assignments",
     "get_performance_transactions",
     "get_dotation_transactions",
+    "get_float_up_transactions",
     "get_performance_filter_options",
     "get_conquete_transactions",
     "get_empietement",

@@ -351,6 +351,76 @@ def get_dotation_transactions(
             conn.close()
 
 
+def get_float_up_transactions(
+    segment: Segment,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    hour_start: Optional[int] = None,
+    hour_end: Optional[int] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> pd.DataFrame:
+    """
+    Transactions de Float Up (retour de float / délestage) émises par les acteurs du segment:
+    - Commerciaux -> Masters
+    - CDS -> Masters
+    - Point Relais -> Masters ou Commerciaux (Caisses = 0 / pas de retour)
+    """
+    conn, close = _with_conn(conn)
+    try:
+        meta = _ACTOR_TABLES[segment]
+        actor_table, actor_id, actor_name = meta["table"], meta["id_col"], meta["name_col"]
+
+        where, params = ["LOWER(t.tx_type) = 'transfer'"], []
+        if start_date:
+            where.append("t.date_only >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("t.date_only <= ?")
+            params.append(end_date)
+        if hour_start is not None:
+            where.append("t.hour >= ?")
+            params.append(hour_start)
+        if hour_end is not None:
+            where.append("t.hour <= ?")
+            params.append(hour_end)
+
+        if segment in ("commercial", "cds"):
+            # Commerciaux et CDS retournent aux masters
+            where.append(
+                "t.to_msisdn IN (SELECT msisdn FROM exclusions_reference WHERE category = 'master')"
+            )
+        elif segment == "pr_caisse":
+            # Point relais uniquement (caisses ne retournent pas)
+            # Retournent chez les masters ou commerciaux
+            where.append("a.type_point = 'Point Relais'")
+            where.append(
+                """
+                (
+                    t.to_msisdn IN (SELECT msisdn FROM exclusions_reference WHERE category = 'master')
+                    OR t.to_msisdn IN (SELECT ccial_msisdn FROM referentiel_commerciaux)
+                    OR t.to_msisdn IN (SELECT msisdn FROM exclusions_reference WHERE category = 'commercial')
+                )
+                """
+            )
+
+        query = f"""
+            SELECT
+                t.id, t.tx_date AS Date, t.date_only AS Date_only, t.hour AS Hour,
+                t.amount AS Amount, t.from_msisdn AS From_clean, t.to_msisdn AS To_clean,
+                a.{actor_id} AS Actor_MSISDN, a.{actor_name} AS Actor_Nom
+            FROM transactions t
+            INNER JOIN {actor_table} a ON t.from_msisdn = a.{actor_id}
+            WHERE {' AND '.join(where)}
+        """
+        df = pd.read_sql_query(query, conn, params=params)
+        if not df.empty and "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        return df
+    finally:
+        if close:
+            conn.close()
+
+
 def get_performance_filter_options(
     segment: Segment,
     conn: Optional[sqlite3.Connection] = None,
