@@ -143,6 +143,29 @@ class PerformanceFilters:
     type_point: str = "Tous"           # pr_caisse uniquement (Point Relais / Caisses)
     territoire: str = "Toutes"         # pr_caisse uniquement
     mapping_hash: Optional[str] = None # Hash du fichier de mapping manuel si fourni
+    tr_mode: str = "actifs"            # "actifs" (jours travaillés) ou "ouvres_26j" (6j/7, standard 26j)
+
+
+def count_working_days_6j(start_date: Optional[str], end_date: Optional[str]) -> int:
+    """Calcule le nombre de jours ouvrés (6j/7, dimanches exclus) sur la période.
+    Pour un mois complet (28 à 31 jours), retourne la norme standard de 26 jours.
+    Pour une période partielle ou personnalisée, compte les jours réels hors dimanches.
+    """
+    if not start_date or not end_date:
+        return 26
+    try:
+        dt_start = pd.to_datetime(start_date).date()
+        dt_end = pd.to_datetime(end_date).date()
+        if dt_start > dt_end:
+            dt_start, dt_end = dt_end, dt_start
+        total_days = (dt_end - dt_start).days + 1
+        if 28 <= total_days <= 31:
+            return 26
+        dates = pd.date_range(start=dt_start, end=dt_end)
+        working_days = sum(1 for d in dates if d.weekday() != 6)
+        return max(1, working_days)
+    except Exception:
+        return 26
 
 
 @dataclass(frozen=True)
@@ -205,6 +228,25 @@ def build_performance_context(
         table["POS_Touches_Others"] = 0
         table["POS_Attribues_Others"] = 0
         table["Taux_Couverture_Others"] = 0.0
+        table["HVC_Wallet"] = 0
+        table["HVC_No_Wallet"] = 0
+        table["Sigma_HVC_Serve"] = 0
+        table["Others_Wallet"] = 0
+        table["Others_No_Wallet"] = 0
+        table["Sigma_Others_Serve"] = 0
+        table["Nb_Trans_HVC_Wallet"] = 0
+        table["Nb_Trans_HVC_No_Wallet"] = 0
+        table["Nb_Trans_Others_Wallet"] = 0
+        table["Nb_Trans_Others_No_Wallet"] = 0
+        table["TR_HVC_Wallet"] = 0.0
+        table["TR_HVC_No_Wallet"] = 0.0
+        table["TR_HVC_General"] = 0.0
+        table["TR_Others_Wallet"] = 0.0
+        table["TR_Others_No_Wallet"] = 0.0
+        table["TR_Others_General"] = 0.0
+        table["TR_HVC"] = 0.0
+        table["TR_Other"] = 0.0
+        table["TR_General"] = 0.0
         table["Taux_Persistance"] = None
 
         cov = compute_coverage_persistence(tx, segment, filters.start_date, filters.end_date)
@@ -274,6 +316,9 @@ def build_performance_context(
             tx, filters.start_date, filters.end_date, manual_mapping=manual_mapping,
             hvc_set=hvc_set, others_set=others_set
         )
+        overlap = [c for c in coverage.columns if c in table.columns and c != "Actor_MSISDN"]
+        if overlap:
+            table = table.drop(columns=overlap)
         table = table.merge(coverage, on="Actor_MSISDN", how="left")
     else:
         # Calcul de Couverture et Persistance
@@ -286,6 +331,10 @@ def build_performance_context(
         "FD_Hors_Portefeuille", "POS_Touches", "POS_Attribues",
         "POS_Touches_HVC", "POS_Attribues_HVC",
         "POS_Touches_Others", "POS_Attribues_Others",
+        "HVC_Wallet", "HVC_No_Wallet", "Sigma_HVC_Serve",
+        "Others_Wallet", "Others_No_Wallet", "Sigma_Others_Serve",
+        "Nb_Trans_HVC_Wallet", "Nb_Trans_HVC_No_Wallet",
+        "Nb_Trans_Others_Wallet", "Nb_Trans_Others_No_Wallet",
         "Dotation_Montant", "FU",
     ]
     for col in numeric_cols:
@@ -293,7 +342,12 @@ def build_performance_context(
             table[col] = 0
         table[col] = pd.to_numeric(table[col], errors="coerce").fillna(0)
 
-    for rate_col in ["Taux_Couverture", "Taux_Couverture_HVC", "Taux_Couverture_Others"]:
+    for rate_col in [
+        "Taux_Couverture", "Taux_Couverture_HVC", "Taux_Couverture_Others",
+        "TR_HVC_Wallet", "TR_HVC_No_Wallet", "TR_HVC_General",
+        "TR_Others_Wallet", "TR_Others_No_Wallet", "TR_Others_General",
+        "TR_HVC", "TR_Other", "TR_General",
+    ]:
         if rate_col not in table.columns:
             table[rate_col] = 0.0
         else:
@@ -303,8 +357,10 @@ def build_performance_context(
         table["Sigma_FD"] = pd.to_numeric(table["FD_HVC"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Others"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Hors_Portefeuille"], errors="coerce").fillna(0).astype(int)
         table["Sigma_POS_Serve"] = pd.to_numeric(table["HVC_Serve"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["Other_Serve"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["Hors_Portefeuille_POS"], errors="coerce").fillna(0).astype(int)
     elif segment == "commercial":
-        table["Sigma_FD"] = (table["FD_HVC"] + table["FD_Others"] + table["FD_Hors_Portefeuille"]).round(0).astype(int)
-        table["Sigma_POS_Serve"] = (table["HVC_Serve"] + table["Other_Serve"] + table["Hors_Portefeuille_POS"]).astype(int)
+        table["Sigma_FD"] = (table["FD_HVC"] + table["FD_Others"]).round(0).astype(int)
+        table["Sigma_POS_Serve"] = (table["Sigma_HVC_Serve"] + table["Sigma_Others_Serve"]).astype(int)
+        table["HVC_Serve"] = table["Sigma_HVC_Serve"]
+        table["Other_Serve"] = table["Sigma_Others_Serve"]
     else: # cds
         table["Sigma_FD"] = (table["FD_HVC"] + table["FD_Hors_Portefeuille"]).round(0).astype(int)
         table["Sigma_POS_Serve"] = (table["HVC_Serve"] + table["Hors_Portefeuille_POS"]).astype(int)
@@ -320,12 +376,22 @@ def build_performance_context(
         # Calcul des activités quotidiennes adapté
         activity = compute_daily_activity_polars(tx, is_single_day=is_single_day)
         table = table.merge(activity, on="Actor_MSISDN", how="left")
-        table["Nb_Jours"] = pd.to_numeric(table.get("Nb_Jours_Actifs"), errors="coerce").fillna(0)
-        table = _add_rotation_rates(table)
+        table["Nb_Jours_Actifs"] = pd.to_numeric(table.get("Nb_Jours_Actifs"), errors="coerce").fillna(0)
+        table["Nb_Jours"] = table["Nb_Jours_Actifs"]
+
+        # Approche calendaire 6j/7 (dimanches exclus — standard 26 jours)
+        nb_ouvres = count_working_days_6j(filters.start_date, filters.end_date)
+        table["Nb_Jours_Ouvres"] = nb_ouvres
+
+        tr_mode = getattr(filters, "tr_mode", "actifs")
+        table = _add_rotation_rates(table, tr_mode=tr_mode, nb_jours_ouvres=nb_ouvres)
 
         # Work Progress commercial : Serve + TR, "Other" au sens large (pas
         # HVC), cf. hypothese 6.
-        work_progress = _compute_work_progress(tx, hvc_set, others_set=None, include_tr=True)
+        work_progress = _compute_work_progress(
+            tx, hvc_set, others_set=None, include_tr=True,
+            tr_mode=tr_mode, nb_jours_ouvres=nb_ouvres
+        )
         table = table.merge(work_progress, on="Actor_MSISDN", how="left")
 
     elif segment == "pr_caisse":
@@ -636,9 +702,9 @@ def _compute_float_up(filters: PerformanceFilters, actor_pool: pd.DataFrame) -> 
 def normalize_commercial_mapping(df: pd.DataFrame) -> pd.DataFrame:
     """Normalise un fichier d'attribution POS <-> Commercial (Excel ou CSV).
     Colonnes reconnues :
-    - POS : AGENT MSISDN, Agent_MSISDN, agent_msisdn, POS_MSISDN, MSISDN_POS, MSISDN, POS, Numero POS
-    - Commercial Nom : Commercial, COMMERCIAL, Nom_Ccial, NOM_CCIAL, Nom Commercial, Ccial, Nom
-    - Commercial Numéro : Numero, Numéro, NUMERO, MSISDN_Commercial, Ccial_MSISDN, CCIAL_MSISDN, Telephone
+    - POS : AGENT MSISDN, Agent_MSISDN, agent_msisdn, POS_MSISDN, MSISDN_POS, MSISDN, POS, Numero POS, HVC_ MSISDN, HVC_MSISDN, HVC MSISDN, NUM_HVC, Numero du point, PDV
+    - Commercial Nom : Commercial, COMMERCIAL, Nom_Ccial, NOM_CCIAL, Nom Commercial, CCIAL, Nom, Ccial en charge, Commercial en charge, Nom du point de relais, NOM_CDS
+    - Commercial Numéro : Numero, Numéro, NUMERO, MSISDN_Commercial, Ccial_MSISDN, CCIAL_MSISDN, MSISDN_CCIAL, Telephone, MSISDN_PR, Parent MSISDN
     """
     if df is None or df.empty:
         return pd.DataFrame(columns=["To_clean", "Commercial", "Commercial_MSISDN"])
@@ -654,9 +720,19 @@ def normalize_commercial_mapping(df: pd.DataFrame) -> pd.DataFrame:
                 return lookup[k]
         return None
 
-    col_pos = pick("AGENT MSISDN", "Agent_MSISDN", "agent_msisdn", "POS_MSISDN", "MSISDN_POS", "MSISDN", "POS", "Numero POS", "Numero_POS", "PDV")
-    col_name = pick("Commercial", "COMMERCIAL", "Nom_Ccial", "NOM_CCIAL", "Nom Commercial", "CCIAL", "Nom")
-    col_num = pick("Numero", "Numéro", "NUMERO", "MSISDN_Commercial", "Ccial_MSISDN", "CCIAL_MSISDN", "MSISDN_CCIAL", "Telephone")
+    col_pos = pick(
+        "AGENT MSISDN", "Agent_MSISDN", "agent_msisdn", "POS_MSISDN", "MSISDN_POS",
+        "MSISDN", "POS", "Numero POS", "Numero_POS", "PDV",
+        "HVC_MSISDN", "HVC MSISDN", "HVC_ MSISDN", "NUM_HVC", "POS MSISDN", "Agent MSISDN", "Numero du point", "Numero_du_point"
+    )
+    col_name = pick(
+        "Commercial", "COMMERCIAL", "Nom_Ccial", "NOM_CCIAL", "Nom Commercial", "CCIAL", "Nom",
+        "Ccial en charge", "Commercial en charge", "Commercial en charge ", "Nom du point de relais", "NOM_CDS"
+    )
+    col_num = pick(
+        "Numero", "Numéro", "NUMERO", "MSISDN_Commercial", "Ccial_MSISDN", "CCIAL_MSISDN",
+        "MSISDN_CCIAL", "Telephone", "MSISDN_PR", "Parent MSISDN", "Parent_MSISDN"
+    )
 
     if not col_pos or not col_name:
         return pd.DataFrame()
@@ -682,7 +758,44 @@ def normalize_commercial_mapping(df: pd.DataFrame) -> pd.DataFrame:
         & ~out["Commercial"].str.lower().isin({"", "nan", "none", "n/a", "null"})
     ].copy()
 
-    out = out.drop_duplicates(subset=["To_clean"], keep="first").reset_index(drop=True)
+    # Déduplication par couple (Commercial, POS) pour préserver le portefeuille de chaque commercial
+    # (une déduplication sur To_clean seul évincerait à tort les POS attribués à des commerciaux apparaissant plus bas dans le fichier)
+    out = out.drop_duplicates(subset=["Commercial", "To_clean"], keep="first").reset_index(drop=True)
+
+    # Enrichissement automatique du MSISDN commercial via le référentiel s'il n'est pas fourni dans le fichier
+    try:
+        from models.reference_model import get_all_commerciaux
+        ref_comm = get_all_commerciaux()
+        if not ref_comm.empty and "Nom_Ccial" in ref_comm.columns and "Ccial_MSISDN" in ref_comm.columns:
+            import unicodedata, re
+            def _get_name_tokens(s: Any) -> set[str]:
+                if not s or pd.isna(s):
+                    return set()
+                norm = unicodedata.normalize("NFKD", str(s)).encode("ASCII", "ignore").decode("utf-8")
+                return {t for t in re.findall(r"[A-Za-z0-9]+", norm.upper()) if len(t) > 1 and t not in ("MD", "ETS", "SARL", "CCIAL", "MR", "MME")}
+
+            ref_map = []
+            for _, r in ref_comm.dropna(subset=["Nom_Ccial", "Ccial_MSISDN"]).iterrows():
+                toks = _get_name_tokens(r["Nom_Ccial"])
+                if toks:
+                    ref_map.append((toks, clean_phone(r["Ccial_MSISDN"])))
+
+            def _resolve_comm_msisdn(row):
+                curr = row.get("Commercial_MSISDN")
+                if curr and pd.notna(curr) and str(curr).strip() not in ("", "None", "nan"):
+                    return curr
+                c_toks = _get_name_tokens(row["Commercial"])
+                if not c_toks:
+                    return curr
+                for r_toks, r_msisdn in ref_map:
+                    if c_toks == r_toks or (len(c_toks) >= 2 and len(r_toks) >= 2 and (c_toks.issubset(r_toks) or r_toks.issubset(c_toks))):
+                        return r_msisdn
+                return curr
+
+            out["Commercial_MSISDN"] = out.apply(_resolve_comm_msisdn, axis=1)
+    except Exception:
+        pass
+
     return out
 
 
@@ -716,8 +829,13 @@ def _compute_commercial_coverage(
 
     if tx.empty:
         for c in [
+            "POS_Touches", "POS_Attribues", "Taux_Couverture",
             "POS_Touches_HVC", "POS_Attribues_HVC", "Taux_Couverture_HVC",
-            "POS_Touches_Others", "POS_Attribues_Others", "Taux_Couverture_Others"
+            "POS_Touches_Others", "POS_Attribues_Others", "Taux_Couverture_Others",
+            "HVC_Wallet", "HVC_No_Wallet", "Sigma_HVC_Serve",
+            "Others_Wallet", "Others_No_Wallet", "Sigma_Others_Serve", "Sigma_POS_Serve",
+            "Nb_Trans_HVC_Wallet", "Nb_Trans_HVC_No_Wallet", "Nb_Trans_HVC",
+            "Nb_Trans_Others_Wallet", "Nb_Trans_Others_No_Wallet", "Nb_Trans_Other",
         ]:
             base_cov[c] = 0
         return base_cov
@@ -738,73 +856,28 @@ def _compute_commercial_coverage(
             if "Commercial" in mapping_df.columns
             else pd.Series("", index=mapping_df.index)
         )
+        import unicodedata, re
+        def _get_name_tokens(s: Any) -> set[str]:
+            if not s or pd.isna(s):
+                return set()
+            norm = unicodedata.normalize("NFKD", str(s)).encode("ASCII", "ignore").decode("utf-8")
+            return {t for t in re.findall(r"[A-Za-z0-9]+", norm.upper()) if len(t) > 1 and t not in ("MD", "ETS", "SARL", "CCIAL", "MR", "MME")}
 
-        for msisdn in tx["Actor_MSISDN"].dropna().unique():
-            tx_comm = tx[tx["Actor_MSISDN"] == msisdn]
-            comm_nom = (
-                str(tx_comm["Actor_Nom"].iloc[0]).strip().upper()
-                if "Actor_Nom" in tx_comm.columns and not tx_comm.empty and pd.notna(tx_comm["Actor_Nom"].iloc[0])
-                else ""
-            )
+        def _tokens_match(t1: set[str], t2: set[str]) -> bool:
+            if not t1 or not t2:
+                return False
+            if t1 == t2:
+                return True
+            common = t1.intersection(t2)
+            if len(common) >= 2:
+                return True
+            if len(common) == 1 and (len(t1) == 1 or len(t2) == 1):
+                tok = next(iter(common))
+                if len(tok) >= 4:
+                    return True
+            return False
 
-            msisdn_9 = str(msisdn)[-9:]
-            def _match_msisdn(val: Any) -> bool:
-                s = str(val).strip() if pd.notna(val) else ""
-                if not s or s.lower() in ("nan", "none", ""):
-                    return False
-                return s[-9:] == msisdn_9 if len(s) >= 9 else s == str(msisdn)
-
-            mask = mapping_df["_clean_msisdn"].apply(_match_msisdn)
-            if comm_nom:
-                mask = mask | (mapping_df["_clean_nom"] == comm_nom)
-
-            assigned_pos = set(mapping_df.loc[mask, "_clean_pos"].dropna())
-            assigned_pos = {p for p in assigned_pos if p}
-            n_attribues = len(assigned_pos)
-
-            assigned_hvc = {p for p in assigned_pos if p in clean_hvc_set}
-            assigned_others = assigned_pos - assigned_hvc
-            n_attribues_hvc = len(assigned_hvc)
-            n_attribues_others = len(assigned_others)
-
-            if n_attribues > 0:
-                touched_assigned = set(tx_comm["To_clean"].astype(str).dropna()).intersection(assigned_pos)
-                n_touches = len(touched_assigned)
-                taux = round(n_touches / n_attribues * 100, 1)
-
-                touched_hvc = touched_assigned.intersection(assigned_hvc)
-                n_touches_hvc = len(touched_hvc)
-                taux_hvc = round(n_touches_hvc / n_attribues_hvc * 100, 1) if n_attribues_hvc > 0 else 0.0
-
-                touched_others = touched_assigned.intersection(assigned_others)
-                n_touches_others = len(touched_others)
-                taux_others = round(n_touches_others / n_attribues_others * 100, 1) if n_attribues_others > 0 else 0.0
-            else:
-                touched_all = set(tx_comm["To_clean"].astype(str).dropna())
-                n_touches = len(touched_all)
-                taux = 0.0
-
-                touched_hvc = touched_all.intersection(clean_hvc_set)
-                n_touches_hvc = len(touched_hvc)
-                taux_hvc = 0.0
-
-                touched_others = touched_all - touched_hvc
-                n_touches_others = len(touched_others)
-                taux_others = 0.0
-
-            rows.append({
-                "Actor_MSISDN": msisdn,
-                "POS_Touches": n_touches,
-                "POS_Attribues": n_attribues,
-                "Taux_Couverture": taux,
-                "POS_Touches_HVC": n_touches_hvc,
-                "POS_Attribues_HVC": n_attribues_hvc,
-                "Taux_Couverture_HVC": taux_hvc,
-                "POS_Touches_Others": n_touches_others,
-                "POS_Attribues_Others": n_attribues_others,
-                "Taux_Couverture_Others": taux_others,
-                "Taux_Persistance": persistence_map.get(msisdn),
-            })
+        mapping_df["_tokens"] = mapping_df["Commercial"].apply(_get_name_tokens)
     else:
         # Mode Automatique : attribution primaire des POS avec >= 3 transactions
         pairs = tx.groupby(["Actor_MSISDN", "To_clean"]).size().reset_index(name="tx_count")
@@ -817,59 +890,109 @@ def _compute_commercial_coverage(
         else:
             assigned_auto = pd.DataFrame(columns=["Actor_MSISDN", "To_clean"])
 
-        for msisdn in tx["Actor_MSISDN"].dropna().unique():
-            tx_comm = tx[tx["Actor_MSISDN"] == msisdn]
+    for msisdn in tx["Actor_MSISDN"].dropna().unique():
+        tx_comm = tx[tx["Actor_MSISDN"] == msisdn]
+
+        # 1. Détermination du portefeuille assigné
+        if has_manual:
+            comm_nom = (
+                str(tx_comm["Actor_Nom"].iloc[0]).strip().upper()
+                if "Actor_Nom" in tx_comm.columns and not tx_comm.empty and pd.notna(tx_comm["Actor_Nom"].iloc[0])
+                else ""
+            )
+            comm_tokens = _get_name_tokens(comm_nom) if comm_nom else set()
+            msisdn_9 = str(msisdn)[-9:]
+            def _match_msisdn(val: Any) -> bool:
+                s = str(val).strip() if pd.notna(val) else ""
+                if not s or s.lower() in ("nan", "none", ""):
+                    return False
+                return s[-9:] == msisdn_9 if len(s) >= 9 else s == str(msisdn)
+
+            mask = mapping_df["_clean_msisdn"].apply(_match_msisdn)
+            if comm_nom:
+                mask = mask | (mapping_df["_clean_nom"] == comm_nom)
+            if comm_tokens:
+                token_mask = mapping_df["_tokens"].apply(lambda t: _tokens_match(comm_tokens, t))
+                mask = mask | token_mask
+
+            assigned_pos = set(mapping_df.loc[mask, "_clean_pos"].dropna())
+        else:
             assigned_pos = set(assigned_auto[assigned_auto["Actor_MSISDN"] == msisdn]["To_clean"].astype(str))
-            assigned_pos = {p for p in assigned_pos if p}
-            n_attribues = len(assigned_pos)
 
-            assigned_hvc = {p for p in assigned_pos if p in clean_hvc_set}
-            assigned_others = assigned_pos - assigned_hvc
-            n_attribues_hvc = len(assigned_hvc)
-            n_attribues_others = len(assigned_others)
+        assigned_pos = {p for p in assigned_pos if p}
+        n_attribues = len(assigned_pos)
+        assigned_hvc = assigned_pos.intersection(clean_hvc_set)
+        assigned_others = assigned_pos - assigned_hvc
+        n_attribues_hvc = len(assigned_hvc)
+        n_attribues_others = len(assigned_others)
 
-            if n_attribues > 0:
-                touched_assigned = set(tx_comm["To_clean"].astype(str).dropna()).intersection(assigned_pos)
-                n_touches = len(touched_assigned)
-                taux = round(n_touches / n_attribues * 100, 1)
+        # 2. Décomposition des POS servis (Wallet vs No_Wallet)
+        touched_all = set(tx_comm["To_clean"].astype(str).dropna())
 
-                touched_hvc = touched_assigned.intersection(assigned_hvc)
-                n_touches_hvc = len(touched_hvc)
-                taux_hvc = round(n_touches_hvc / n_attribues_hvc * 100, 1) if n_attribues_hvc > 0 else 0.0
+        # Portefeuille (Wallet)
+        touched_assigned_hvc = touched_all.intersection(assigned_hvc)
+        touched_assigned_others = touched_all.intersection(assigned_others)
+        touched_assigned = touched_assigned_hvc | touched_assigned_others
+        hvc_wallet = len(touched_assigned_hvc)
+        others_wallet = len(touched_assigned_others)
+        n_touches = len(touched_assigned)
 
-                touched_others = touched_assigned.intersection(assigned_others)
-                n_touches_others = len(touched_others)
-                taux_others = round(n_touches_others / n_attribues_others * 100, 1) if n_attribues_others > 0 else 0.0
-            else:
-                touched_all = set(tx_comm["To_clean"].astype(str).dropna())
-                touched_hvc = touched_all.intersection(clean_hvc_set)
-                touched_others = touched_all - touched_hvc
+        # Hors-Portefeuille (No_Wallet)
+        outside_pos = touched_all - assigned_pos
+        touched_outside_hvc = outside_pos.intersection(clean_hvc_set)
+        touched_outside_others = outside_pos - touched_outside_hvc
+        hvc_no_wallet = len(touched_outside_hvc)
+        others_no_wallet = len(touched_outside_others)
 
-                n_touches = len(touched_all)
-                n_attribues = n_touches
-                taux = 100.0 if n_touches > 0 else 0.0
+        # Sommes POS servis
+        sigma_hvc_serve = hvc_wallet + hvc_no_wallet
+        sigma_others_serve = others_wallet + others_no_wallet
+        sigma_pos_serve = sigma_hvc_serve + sigma_others_serve
 
-                n_touches_hvc = len(touched_hvc)
-                n_attribues_hvc = n_touches_hvc
-                taux_hvc = 100.0 if n_touches_hvc > 0 else 0.0
+        # 3. Décompte des transactions (pour les TR Wallet / No_Wallet)
+        to_clean_series = tx_comm["To_clean"].astype(str)
+        is_assigned = to_clean_series.isin(assigned_pos)
+        is_hvc = to_clean_series.isin(clean_hvc_set)
 
-                n_touches_others = len(touched_others)
-                n_attribues_others = n_touches_others
-                taux_others = 100.0 if n_touches_others > 0 else 0.0
+        nb_trans_hvc_wallet = int((is_assigned & is_hvc).sum())
+        nb_trans_hvc_no_wallet = int((~is_assigned & is_hvc).sum())
+        nb_trans_hvc = nb_trans_hvc_wallet + nb_trans_hvc_no_wallet
 
-            rows.append({
-                "Actor_MSISDN": msisdn,
-                "POS_Touches": n_touches,
-                "POS_Attribues": n_attribues,
-                "Taux_Couverture": taux,
-                "POS_Touches_HVC": n_touches_hvc,
-                "POS_Attribues_HVC": n_attribues_hvc,
-                "Taux_Couverture_HVC": taux_hvc,
-                "POS_Touches_Others": n_touches_others,
-                "POS_Attribues_Others": n_attribues_others,
-                "Taux_Couverture_Others": taux_others,
-                "Taux_Persistance": persistence_map.get(msisdn),
-            })
+        nb_trans_others_wallet = int((is_assigned & ~is_hvc).sum())
+        nb_trans_others_no_wallet = int((~is_assigned & ~is_hvc).sum())
+        nb_trans_other = nb_trans_others_wallet + nb_trans_others_no_wallet
+
+        # 4. Taux de couverture
+        taux = round(n_touches / n_attribues * 100, 1) if n_attribues > 0 else 0.0
+        taux_hvc = round(hvc_wallet / n_attribues_hvc * 100, 1) if n_attribues_hvc > 0 else 0.0
+        taux_others = round(others_wallet / n_attribues_others * 100, 1) if n_attribues_others > 0 else 0.0
+
+        rows.append({
+            "Actor_MSISDN": msisdn,
+            "POS_Touches": n_touches,
+            "POS_Attribues": n_attribues,
+            "Taux_Couverture": taux,
+            "POS_Touches_HVC": hvc_wallet,
+            "POS_Attribues_HVC": n_attribues_hvc,
+            "Taux_Couverture_HVC": taux_hvc,
+            "POS_Touches_Others": others_wallet,
+            "POS_Attribues_Others": n_attribues_others,
+            "Taux_Couverture_Others": taux_others,
+            "HVC_Wallet": hvc_wallet,
+            "HVC_No_Wallet": hvc_no_wallet,
+            "Sigma_HVC_Serve": sigma_hvc_serve,
+            "Others_Wallet": others_wallet,
+            "Others_No_Wallet": others_no_wallet,
+            "Sigma_Others_Serve": sigma_others_serve,
+            "Sigma_POS_Serve": sigma_pos_serve,
+            "Nb_Trans_HVC_Wallet": nb_trans_hvc_wallet,
+            "Nb_Trans_HVC_No_Wallet": nb_trans_hvc_no_wallet,
+            "Nb_Trans_HVC": nb_trans_hvc,
+            "Nb_Trans_Others_Wallet": nb_trans_others_wallet,
+            "Nb_Trans_Others_No_Wallet": nb_trans_others_no_wallet,
+            "Nb_Trans_Other": nb_trans_other,
+            "Taux_Persistance": persistence_map.get(msisdn),
+        })
 
     return pd.DataFrame(rows)
 
@@ -1050,6 +1173,8 @@ def _compute_work_progress(
     hvc_set: set,
     others_set: Optional[set] = None,
     include_tr: bool = True,
+    tr_mode: str = "actifs",
+    nb_jours_ouvres: Optional[int] = None,
 ) -> pd.DataFrame:
     """Serve (HVC/Other) par fenetre intraday, + TR optionnel."""
     if tx.empty:
@@ -1100,7 +1225,10 @@ def _compute_work_progress(
             value_cols = ["Serve"]
             rename_map = {"Serve_HVC": serve_col, "Serve_OTHER": other_serve_col}
             if include_tr:
-                denom = grouped["Serve"].replace(0, np.nan) * grouped["Nb_Jours"].replace(0, np.nan) * 3
+                if tr_mode == "ouvres_26j" and nb_jours_ouvres:
+                    denom = grouped["Serve"].replace(0, np.nan) * float(nb_jours_ouvres) * 3
+                else:
+                    denom = grouped["Serve"].replace(0, np.nan) * grouped["Nb_Jours"].replace(0, np.nan) * 3
                 grouped["TR"] = ((grouped["Nb_Trans"] / denom) * 100).fillna(0).round(1)
                 value_cols.append("TR")
                 rename_map.update({"TR_HVC": tr_col, "TR_OTHER": other_tr_col})
@@ -1117,25 +1245,65 @@ def _compute_work_progress(
 # Rotation (commercial uniquement — le Top 10 pr_caisse n'utilise pas TR)
 # ---------------------------------------------------------------------------
 
-def _add_rotation_rates(table: pd.DataFrame) -> pd.DataFrame:
-    """TR_HVC / TR_Other / TR_General = Nb_Trans / (Serve * Nb_Jours * 3) * 100, sur la periode complete.
-
-    Utilisee UNIQUEMENT pour commercial : le Top 10 pr_caisse n'utilise pas
-    de taux de rotation (cf. hypothese 7), donc ce calcul ne lui est plus
-    applique.
+def _add_rotation_rates(
+    table: pd.DataFrame,
+    tr_mode: str = "actifs",
+    nb_jours_ouvres: Optional[int] = None,
+) -> pd.DataFrame:
+    """Calcul des taux de rotation (TR) scindés pour les commerciaux :
+    - TR_HVC_Wallet / TR_HVC_No_Wallet / TR_HVC_General
+    - TR_Others_Wallet / TR_Others_No_Wallet / TR_Others_General
+    - TR_General (total)
+    Formule : Nb_Trans / (Serve * Nb_Jours * 3) * 100
+    - Mode 'actifs' : basé sur les jours réellement travaillés par chaque commercial.
+    - Mode 'ouvres_26j' : basé sur les jours ouvrés théoriques (6j/7, dimanches exclus — standard 26j).
     """
     table = table.copy()
-    nb_jours = pd.to_numeric(table.get("Nb_Jours", 0), errors="coerce").replace(0, np.nan)
+    if tr_mode == "ouvres_26j" and nb_jours_ouvres:
+        nb_jours = pd.Series(float(nb_jours_ouvres), index=table.index, dtype=float)
+    else:
+        nb_jours = pd.to_numeric(table.get("Nb_Jours_Actifs", table.get("Nb_Jours", 0)), errors="coerce").replace(0, np.nan)
+
+    # Assurer que Nb_Trans_HVC et Nb_Trans_Other sont toujours calculés et cohérents
+    nb_trans_hvc = pd.to_numeric(table.get("Nb_Trans_HVC", 0), errors="coerce").fillna(0)
+    if (nb_trans_hvc == 0).all():
+        nb_trans_hvc = (
+            pd.to_numeric(table.get("Nb_Trans_HVC_Wallet", 0), errors="coerce").fillna(0)
+            + pd.to_numeric(table.get("Nb_Trans_HVC_No_Wallet", 0), errors="coerce").fillna(0)
+        )
+        table["Nb_Trans_HVC"] = nb_trans_hvc
+
+    nb_trans_others = pd.to_numeric(table.get("Nb_Trans_Other", 0), errors="coerce").fillna(0)
+    if (nb_trans_others == 0).all():
+        nb_trans_others = (
+            pd.to_numeric(table.get("Nb_Trans_Others_Wallet", 0), errors="coerce").fillna(0)
+            + pd.to_numeric(table.get("Nb_Trans_Others_No_Wallet", 0), errors="coerce").fillna(0)
+        )
+        table["Nb_Trans_Other"] = nb_trans_others
 
     def _rate(nb_trans_col: str, serve_col: str) -> pd.Series:
         nb_trans = pd.to_numeric(table.get(nb_trans_col, 0), errors="coerce")
         serve = pd.to_numeric(table.get(serve_col, 0), errors="coerce").replace(0, np.nan)
         return ((nb_trans / (serve * nb_jours * 3)) * 100).fillna(0).round(1)
 
-    table["TR_HVC"] = _rate("Nb_Trans_HVC", "HVC_Serve")
-    table["TR_Other"] = _rate("Nb_Trans_Other", "Other_Serve")
+    # Scission TR HVC
+    table["TR_HVC_Wallet"] = _rate("Nb_Trans_HVC_Wallet", "HVC_Wallet")
+    table["TR_HVC_No_Wallet"] = _rate("Nb_Trans_HVC_No_Wallet", "HVC_No_Wallet")
+    table["TR_HVC_General"] = _rate("Nb_Trans_HVC", "Sigma_HVC_Serve")
+    table["TR_HVC"] = table["TR_HVC_General"]
 
-    nb_transactions = pd.to_numeric(table.get("Nb_Transactions", 0), errors="coerce")
+    # Scission TR Others
+    table["TR_Others_Wallet"] = _rate("Nb_Trans_Others_Wallet", "Others_Wallet")
+    table["TR_Others_No_Wallet"] = _rate("Nb_Trans_Others_No_Wallet", "Others_No_Wallet")
+    table["TR_Others_General"] = _rate("Nb_Trans_Other", "Sigma_Others_Serve")
+    table["TR_Other"] = table["TR_Others_General"]
+
+    # TR General Total
+    nb_transactions = pd.to_numeric(table.get("Nb_Transactions", 0), errors="coerce").fillna(0)
+    if (nb_transactions == 0).all():
+        nb_transactions = table["Nb_Trans_HVC"] + table["Nb_Trans_Other"]
+        table["Nb_Transactions"] = nb_transactions
+
     sigma_serve = pd.to_numeric(table.get("Sigma_POS_Serve", 0), errors="coerce").replace(0, np.nan)
     table["TR_General"] = ((nb_transactions / (sigma_serve * nb_jours * 3)) * 100).fillna(0).round(1)
 
@@ -1182,14 +1350,15 @@ def _rank_top_actors(table: pd.DataFrame, segment: Segment, top_n: int = 10) -> 
 
     # commercial : formule historique inchangee.
     work = table.copy()
-    for col in ["Nb_Jours", "HVC_Serve", "TR_General", "Sigma_FD", "Premiere_Trans_min"]:
+    col_nb_j = "Nb_Jours_Actifs" if "Nb_Jours_Actifs" in work.columns else "Nb_Jours"
+    for col in [col_nb_j, "HVC_Serve", "TR_General", "Sigma_FD", "Premiere_Trans_min"]:
         if col not in work.columns:
             work[col] = 0
         work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
 
     precocite = work["Premiere_Trans_min"].replace(0, np.nan).fillna(24 * 60)
     score = (
-        _normalize(work["Nb_Jours"]) * 0.20
+        _normalize(work[col_nb_j]) * 0.20
         + _normalize(work["HVC_Serve"]) * 0.20
         + _normalize(work["TR_General"]) * 0.20
         + _normalize(work["Sigma_FD"]) * 0.20
@@ -1208,3 +1377,254 @@ def _empty_context(filters: PerformanceFilters, message: str) -> PerformanceCont
         is_empty=True,
         message=message,
     )
+
+
+def build_unserved_pos_export(
+    filters: PerformanceFilters,
+    manual_mapping: Optional[pd.DataFrame] = None,
+) -> bytes:
+    """Génère un classeur Excel multi-feuilles contenant :
+    1. 'Attribués non servis' : POS attribués à un commercial qui n'ont reçu aucune
+       transaction de ce commercial sur la période / filtres sélectionnés.
+    2. 'Non attribués non servis' : POS du référentiel (selon les filtres géographiques)
+       non attribués à aucun commercial et n'ayant reçu aucune transaction sur la période.
+    3. 'Synthèse' : Récapitulatif par commercial et par zone.
+    """
+    import io
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    if manual_mapping is None:
+        try:
+            import streamlit as st
+            manual_mapping = st.session_state.get("perf_commercial_manual_mapping")
+        except Exception:
+            manual_mapping = None
+
+    excluded = get_excluded_msisdns()
+    actor_pool = _load_actor_pool(filters)
+    tx = _load_and_scope_transactions(filters, excluded)
+
+    actor_msisdn = getattr(filters, "actor_msisdn", None)
+    if actor_msisdn and actor_msisdn not in ("Tous", "Toutes", None):
+        clean_actor = clean_phone(actor_msisdn)
+        actor_pool = actor_pool[actor_pool["Actor_MSISDN"] == clean_actor]
+        if not tx.empty:
+            tx = tx[tx["Actor_MSISDN"] == clean_actor]
+
+    # Référentiel POS
+    conn = get_connection()
+    try:
+        ref_pos_df = pd.read_sql_query("""
+            SELECT 
+                TRIM(p.agent_msisdn) AS pos_msisdn,
+                MAX(p.full_name) AS pos_name,
+                MAX(p.zone_centre) AS zone_centre,
+                MAX(p.zone_territoire) AS zone_territoire,
+                MAX(p.zone_sa) AS zone_sa,
+                MAX(p.secteur_cluster) AS secteur_cluster,
+                MAX(COALESCE(s.sitename, p.site_key)) AS site,
+                MAX(p.segment_group) AS segment_group
+            FROM referentiel_pos p
+            LEFT JOIN sites s ON p.site_key = s.site_key
+            WHERE p.agent_msisdn IS NOT NULL AND TRIM(p.agent_msisdn) <> ''
+            GROUP BY TRIM(p.agent_msisdn)
+        """, conn)
+    finally:
+        conn.close()
+
+    ref_pos_df["clean_pos"] = ref_pos_df["pos_msisdn"].map(clean_phone)
+    pos_lookup = {r["clean_pos"]: r for r in ref_pos_df.to_dict("records")}
+
+    has_manual = manual_mapping is not None and isinstance(manual_mapping, pd.DataFrame) and not manual_mapping.empty
+
+    import unicodedata, re
+    def _get_name_tokens(s: Any) -> set[str]:
+        if not s or pd.isna(s):
+            return set()
+        norm = unicodedata.normalize("NFKD", str(s)).encode("ASCII", "ignore").decode("utf-8")
+        return {t for t in re.findall(r"[A-Za-z0-9]+", norm.upper()) if len(t) > 1 and t not in ("MD", "ETS", "SARL", "CCIAL", "MR", "MME")}
+
+    def _tokens_match(t1: set[str], t2: set[str]) -> bool:
+        if not t1 or not t2:
+            return False
+        if t1 == t2:
+            return True
+        common = t1.intersection(t2)
+        if len(common) >= 2:
+            return True
+        if len(common) == 1 and (len(t1) == 1 or len(t2) == 1):
+            tok = next(iter(common))
+            if len(tok) >= 4:
+                return True
+        return False
+
+    if has_manual:
+        mapping_df = manual_mapping.copy()
+        mapping_df["_clean_pos"] = mapping_df["To_clean"].fillna("").astype(str).str.strip().map(clean_phone)
+        mapping_df["_clean_msisdn"] = (
+            mapping_df["Commercial_MSISDN"].fillna("").astype(str).str.strip().map(clean_phone)
+            if "Commercial_MSISDN" in mapping_df.columns
+            else pd.Series("", index=mapping_df.index)
+        )
+        mapping_df["_clean_nom"] = (
+            mapping_df["Commercial"].fillna("").astype(str).str.strip().str.upper()
+            if "Commercial" in mapping_df.columns
+            else pd.Series("", index=mapping_df.index)
+        )
+        mapping_df["_tokens"] = mapping_df["Commercial"].apply(_get_name_tokens)
+    else:
+        mapping_df = pd.DataFrame()
+        pairs = tx.groupby(["Actor_MSISDN", "To_clean"]).size().reset_index(name="tx_count") if not tx.empty else pd.DataFrame()
+        if not pairs.empty:
+            assigned_auto = (
+                pairs[pairs["tx_count"] >= 3]
+                .sort_values(["To_clean", "tx_count"], ascending=[True, False])
+                .drop_duplicates(subset=["To_clean"], keep="first")
+            )
+        else:
+            assigned_auto = pd.DataFrame(columns=["Actor_MSISDN", "To_clean"])
+
+    rows_attrib = []
+    all_assigned_pos = set()
+
+    for _, actor in actor_pool.iterrows():
+        msisdn = actor.get("Actor_MSISDN")
+        comm_nom = str(actor.get("Actor_Nom", "")).strip().upper()
+        zone_c = actor.get("Zone_Centre", "")
+        zone_t = actor.get("Zone_Territoire", "")
+        zone_sa = actor.get("Zone_SA", "")
+
+        tx_comm = tx[tx["Actor_MSISDN"] == msisdn] if not tx.empty else pd.DataFrame()
+        touched_pos = set(tx_comm["To_clean"].dropna()) if not tx_comm.empty else set()
+
+        if has_manual:
+            comm_tokens = _get_name_tokens(comm_nom) if comm_nom else set()
+            msisdn_9 = str(msisdn)[-9:]
+            def _match_msisdn(val: Any) -> bool:
+                s = str(val).strip() if pd.notna(val) else ""
+                if not s or s.lower() in ("nan", "none", ""):
+                    return False
+                return s[-9:] == msisdn_9 if len(s) >= 9 else s == str(msisdn)
+
+            mask = mapping_df["_clean_msisdn"].apply(_match_msisdn)
+            if comm_nom:
+                mask = mask | (mapping_df["_clean_nom"] == comm_nom)
+            if comm_tokens:
+                token_mask = mapping_df["_tokens"].apply(lambda t: _tokens_match(comm_tokens, t))
+                mask = mask | token_mask
+
+            assigned_pos = set(mapping_df.loc[mask, "_clean_pos"].dropna())
+        else:
+            assigned_pos = (
+                set(assigned_auto[assigned_auto["Actor_MSISDN"] == msisdn]["To_clean"].astype(str))
+                if not assigned_auto.empty
+                else set()
+            )
+
+        assigned_pos = {p for p in assigned_pos if p}
+        all_assigned_pos |= assigned_pos
+
+        unserved_pos = assigned_pos - touched_pos
+        for pos in sorted(unserved_pos):
+            p_info = pos_lookup.get(pos, {})
+            rows_attrib.append({
+                "Numero_POS": pos,
+                "Nom_POS": p_info.get("pos_name") or "",
+                "Segment_POS": p_info.get("segment_group") or "",
+                "Commercial_Attribue": actor.get("Actor_Nom", ""),
+                "Commercial_MSISDN": msisdn or "",
+                "Zone_Centre": p_info.get("zone_centre") or zone_c,
+                "Zone_Territoire": p_info.get("zone_territoire") or zone_t,
+                "Zone_SA": p_info.get("zone_sa") or zone_sa,
+                "Secteur_Cluster": p_info.get("secteur_cluster") or "",
+                "Site": p_info.get("site") or "",
+                "Statut": "Attribué non servi",
+            })
+
+    cols_attrib = [
+        "Numero_POS", "Nom_POS", "Segment_POS", "Commercial_Attribue", "Commercial_MSISDN",
+        "Zone_Centre", "Zone_Territoire", "Zone_SA", "Secteur_Cluster", "Site", "Statut"
+    ]
+    df_attrib = pd.DataFrame(rows_attrib, columns=cols_attrib) if rows_attrib else pd.DataFrame(columns=cols_attrib)
+
+    # 2. Non attribués et non servis
+    all_touched_pos = set(tx["To_clean"].dropna()) if not tx.empty else set()
+
+    ref_in_scope = ref_pos_df.copy()
+    if filters.zone_centre not in ("Toutes", "Tous", None):
+        ref_in_scope = ref_in_scope[ref_in_scope["zone_centre"] == filters.zone_centre]
+    if filters.zone_territoire not in ("Toutes", "Tous", None):
+        ref_in_scope = ref_in_scope[ref_in_scope["zone_territoire"] == filters.zone_territoire]
+    if filters.zone_sa not in ("Toutes", "Tous", None):
+        ref_in_scope = ref_in_scope[ref_in_scope["zone_sa"] == filters.zone_sa]
+
+    unassigned_unserved = ref_in_scope[
+        ~ref_in_scope["clean_pos"].isin(all_assigned_pos)
+        & ~ref_in_scope["clean_pos"].isin(all_touched_pos)
+    ]
+
+    rows_non_attrib = []
+    for _, r in unassigned_unserved.iterrows():
+        rows_non_attrib.append({
+            "Numero_POS": r["clean_pos"],
+            "Nom_POS": r["pos_name"] or "",
+            "Segment_POS": r["segment_group"] or "",
+            "Zone_Centre": r["zone_centre"] or "",
+            "Zone_Territoire": r["zone_territoire"] or "",
+            "Zone_SA": r["zone_sa"] or "",
+            "Secteur_Cluster": r["secteur_cluster"] or "",
+            "Site": r["site"] or "",
+            "Commercial_Attribue": "Non attribué",
+            "Statut": "Non attribué non servi",
+        })
+    cols_non_attrib = [
+        "Numero_POS", "Nom_POS", "Segment_POS", "Zone_Centre", "Zone_Territoire",
+        "Zone_SA", "Secteur_Cluster", "Site", "Commercial_Attribue", "Statut"
+    ]
+    df_non_attrib = pd.DataFrame(rows_non_attrib, columns=cols_non_attrib) if rows_non_attrib else pd.DataFrame(columns=cols_non_attrib)
+
+    # 3. Synthèse
+    recap_comm = (
+        df_attrib.groupby(["Zone_SA", "Commercial_Attribue", "Commercial_MSISDN"]).size().reset_index(name="Nb_Attribues_Non_Servis")
+        if not df_attrib.empty
+        else pd.DataFrame(columns=["Zone_SA", "Commercial_Attribue", "Commercial_MSISDN", "Nb_Attribues_Non_Servis"])
+    )
+    recap_zone = (
+        df_non_attrib.groupby(["Zone_Centre", "Zone_Territoire", "Zone_SA"]).size().reset_index(name="Nb_Non_Attribues_Non_Servis")
+        if not df_non_attrib.empty
+        else pd.DataFrame(columns=["Zone_Centre", "Zone_Territoire", "Zone_SA", "Nb_Non_Attribues_Non_Servis"])
+    )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_attrib.to_excel(writer, sheet_name="Attribues_Non_Servis", index=False)
+        df_non_attrib.to_excel(writer, sheet_name="Non_Attribues_Non_Servis", index=False)
+        recap_comm.to_excel(writer, sheet_name="Synthese_Commerciaux", index=False)
+        recap_zone.to_excel(writer, sheet_name="Synthese_Zones", index=False)
+
+        wb = writer.book
+        header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
+        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        thin_border = Border(
+            left=Side(style="thin", color="E5E7EB"),
+            right=Side(style="thin", color="E5E7EB"),
+            top=Side(style="thin", color="E5E7EB"),
+            bottom=Side(style="thin", color="E5E7EB"),
+        )
+        for ws in wb.worksheets:
+            ws.views.sheetView[0].showGridLines = True
+            for col_idx in range(1, ws.max_column + 1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                col_letter = get_column_letter(col_idx)
+                max_len = max(len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(1, min(ws.max_row + 1, 100)))
+                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                for cell in row:
+                    cell.border = thin_border
+
+    return output.getvalue()
+

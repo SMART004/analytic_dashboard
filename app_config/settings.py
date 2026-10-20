@@ -44,3 +44,6 @@ PERMISSIONS = {
     ROLE_MANAGER: ["dashboard", "performance", "oos_analysis", "relationship_map"],
     ROLE_VIEWER: ["dashboard", "oos_analysis", "relationship_map"],
 }
+
+# ─── Authentification & Sessions ───────────────────────────────────────────────
+AUTH_SESSION_DURATION_HOURS: int = 24  # Durée de vie maximale d'une session (24h)

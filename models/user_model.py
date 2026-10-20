@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from models.db import get_connection
 from utils.config_storage import LOCAL_STORAGE_PATH
+from app_config.settings import AUTH_SESSION_DURATION_HOURS
 
 LEGACY_DB_PATH = Path("dashboard.db")
 
@@ -134,11 +135,11 @@ def delete_user(user_id: int) -> None:
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
 
-def create_auth_session(username: str, days: int = 7) -> str:
-    """Crée un jeton opaque dont seule l'empreinte est stockée en base."""
+def create_auth_session(username: str, hours: int = AUTH_SESSION_DURATION_HOURS) -> str:
+    """Crée un jeton opaque dont seule l'empreinte est stockée en base avec expiration à 24h."""
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO auth_sessions (token_hash, username, expires_at) VALUES (?, ?, ?)",
@@ -148,23 +149,24 @@ def create_auth_session(username: str, days: int = 7) -> str:
 
 
 def get_user_by_session_token(token: str) -> Optional[Dict[str, Any]]:
-    """Retourne le compte lié à un jeton encore valide."""
+    """Retourne le compte lié à un jeton encore valide (non expiré)."""
     if not token:
         return None
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now_iso = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT u.id, u.username, u.role
+            SELECT u.id, u.username, u.role, s.expires_at
             FROM auth_sessions s
             JOIN users u ON u.username = s.username
             WHERE s.token_hash = ? AND s.expires_at > ?
             """,
-            (token_hash, datetime.now(timezone.utc).isoformat()),
+            (token_hash, now_iso),
         ).fetchone()
     if not row:
         return None
-    return {"id": row[0], "username": row[1], "role": row[2]}
+    return {"id": row[0], "username": row[1], "role": row[2], "expires_at": row[3]}
 
 
 def delete_auth_session(token: str) -> None:
@@ -174,3 +176,14 @@ def delete_auth_session(token: str) -> None:
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with get_connection() as conn:
         conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+
+
+def clean_expired_sessions() -> int:
+    """Supprime toutes les sessions expirées de la base SQLite."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_connection() as conn:
+            cursor = conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_iso,))
+            return cursor.rowcount
+    except Exception:
+        return 0

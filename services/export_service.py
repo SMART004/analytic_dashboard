@@ -55,6 +55,7 @@ DEFAULT_STYLE: StyleDict = {
     "font_size": 8.0,
     "header_font_size": 8.5,
     "max_rows_per_image": 40,
+    "max_image_width_px": 3600,
     "max_image_height_px": 6000,
     "dpi": 200,
     "sheet_name": "Analyse",
@@ -87,6 +88,27 @@ def to_excel(
     ws.title = _safe_sheet_name(sheet_name or style["sheet_name"])
 
     _write_excel_table(ws, df, style)
+    wb.save(output)
+    return output.getvalue()
+
+
+def to_excel_sheets(
+    sheets: Mapping[str, pd.DataFrame],
+    styles: Optional[StyleDict] = None,
+) -> bytes:
+    """Return an XLSX export containing multiple styled sheets."""
+    style = _merge_style(styles)
+    output = io.BytesIO()
+    wb = Workbook()
+    first = True
+    for sheet_name, df in sheets.items():
+        if first:
+            ws = wb.active
+            ws.title = _safe_sheet_name(sheet_name)
+            first = False
+        else:
+            ws = wb.create_sheet(title=_safe_sheet_name(sheet_name))
+        _write_excel_table(ws, df, style)
     wb.save(output)
     return output.getvalue()
 
@@ -261,8 +283,12 @@ def _render_image_page(df: pd.DataFrame, style: StyleDict, title: str = "") -> b
     fig_w = max(8.0, total_w * 0.68)
     fig_h = max(2.2, (n_rows + header_rows) * 0.34 + (0.6 if title else 0.2))
     dpi = int(style["dpi"])
-    if fig_h * dpi > int(style["max_image_height_px"]):
-        dpi = max(60, int(int(style["max_image_height_px"]) / fig_h))
+    max_w_px = int(style.get("max_image_width_px", 3600))
+    max_h_px = int(style.get("max_image_height_px", 6000))
+    if fig_w * dpi > max_w_px:
+        dpi = min(dpi, max(72, int(max_w_px / fig_w)))
+    if fig_h * dpi > max_h_px:
+        dpi = min(dpi, max(60, int(max_h_px / fig_h)))
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
     ax.set_xlim(0, total_w)
@@ -337,7 +363,10 @@ def _render_image_page(df: pd.DataFrame, style: StyleDict, title: str = "") -> b
                 text_obj.set_clip_path(rect)
             x += width
 
-    fig.tight_layout(pad=0.6)
+    try:
+        fig.tight_layout(pad=0.6)
+    except Exception:
+        pass
     return _fig_to_png(fig)
 
 
