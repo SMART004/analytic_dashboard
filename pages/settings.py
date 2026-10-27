@@ -3,6 +3,7 @@ import streamlit as st
 from utils.turso_storage import handle_upload
 from ingestion.ingest import run_referentiel_ingestion, update_pos_targets_from_file
 from utils.turso_storage import load_setting
+from views.sync_widget import render_sync_full_panel
 
 
 def _handle_reference_upload(**kwargs):
@@ -19,7 +20,8 @@ def show_settings():
     st.title("⚙️ Settings - Configurations")
     st.markdown("**Chargez ici tous les fichiers et configurations de l'application**")
 
-    (tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13,
+    (
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14,
     ) = st.tabs([
         "Commerciaux",
         "Caisses",
@@ -34,6 +36,7 @@ def show_settings():
         "HVC CDS (Quota)",
         "Cibles POS (OOS / Day Target)",
         "Mapping PR -> POS",
+        "🌐 Mode Local-First & Synchro",
     ])
 
     # ===================== ONGLET COMMERCIAUX =====================
@@ -312,7 +315,12 @@ def show_settings():
                     cols[i % 4].metric(label, counts.get(key, 0))
                 st.cache_data.clear()
 
+    # ===================== ONGLET LOCAL-FIRST & SYNCHRO =====================
+    with tab14:
+        render_sync_full_panel()
+
     st.info(
         "Tous les fichiers et configurations chargés ici sont disponibles "
         "dans les autres pages après synchronisation."
     )
+

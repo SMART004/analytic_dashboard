@@ -79,15 +79,21 @@ class _LibsqlConnection:
 
     def executemany(self, *args, **kwargs):
         if len(args) >= 2 and isinstance(args[1], (list, tuple)):
-            normalized_query = _normalize_parameters((args[0], args[1][0])) if args[1] else args
+            clean_rows = [
+                tuple(v) if not isinstance(v, (list, tuple, Mapping)) else v
+                for v in args[1]
+            ]
+            normalized_query = _normalize_parameters((args[0], clean_rows[0])) if clean_rows else args
             if normalized_query is not args:
                 query, _ = normalized_query
                 parameters = [
                     _normalize_parameters((args[0], values))[1]
                     if isinstance(values, Mapping) else values
-                    for values in args[1]
+                    for values in clean_rows
                 ]
                 args = (query, parameters, *args[2:])
+            else:
+                args = (args[0], clean_rows, *args[2:])
         return _LibsqlCursor(self._connection.executemany(*args, **kwargs), self)
 
     def executescript(self, script):
@@ -143,15 +149,21 @@ class _LibsqlCursor:
 
     def executemany(self, *args, **kwargs):
         if len(args) >= 2 and isinstance(args[1], (list, tuple)) and args[1]:
-            normalized_query = _normalize_parameters((args[0], args[1][0]))
+            clean_rows = [
+                tuple(v) if not isinstance(v, (list, tuple, Mapping)) else v
+                for v in args[1]
+            ]
+            normalized_query = _normalize_parameters((args[0], clean_rows[0]))
             if normalized_query is not args:
                 query, _ = normalized_query
                 parameters = [
                     _normalize_parameters((args[0], values))[1]
                     if isinstance(values, Mapping) else values
-                    for values in args[1]
+                    for values in clean_rows
                 ]
                 args = (query, parameters, *args[2:])
+            else:
+                args = (args[0], clean_rows, *args[2:])
         self._cursor.executemany(*args, **kwargs)
         return self
 
@@ -231,6 +243,39 @@ def get_db_path() -> Path:
     return db_path
 
 
+def get_remote_connection() -> Optional[_LibsqlConnection]:
+    """Retourne une connexion explicite vers Turso distant (pour la synchronisation).
+    N'est pas limitée par USE_LOCAL_STORAGE."""
+    url = get_config_value("LIBSQL_URL") or get_config_value("TURSO_DATABASE_URL")
+    token = get_config_value("LIBSQL_AUTH_TOKEN") or get_config_value("TURSO_AUTH_TOKEN")
+    if not url or not token or libsql is None:
+        return None
+    try:
+        conn = _LibsqlConnection(
+            libsql.connect(
+                url,
+                auth_token=token,
+                autocommit=True,
+            ),
+            sync_enabled=False,
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+    except Exception as exc:
+        logger.warning("Connexion Turso distante impossible (%s)", exc)
+        return None
+
+
+def _apply_local_pragmas(conn: sqlite3.Connection) -> None:
+    """Applique les PRAGMAs SQLite optimisés pour la stabilité et la performance locale."""
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA cache_size=-64000;")       # 64 Mo de cache en mémoire
+    conn.execute("PRAGMA temp_store=MEMORY;")       # Évite les erreurs disque/temp et verrous de fichiers temporaires
+    conn.execute("PRAGMA mmap_size=0;")             # Désactive mmap sous Windows pour éliminer les 'disk I/O error' (SQLITE_IOERR_MMAP)
+    conn.execute("PRAGMA busy_timeout=30000;")      # 30s timeout anti-verrou
+
+
 def get_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
     """
     Retourne une connexion SQLite configurée (WAL, foreign_keys off pendant
@@ -246,33 +291,38 @@ def get_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
     if db_path is None:
         db_path = get_db_path()
 
+    conn = None
     libsql_url, libsql_token = _libsql_settings()
     if libsql_url:
         if libsql is None:
-            raise RuntimeError(
+            logger.warning(
                 "LIBSQL_URL est configuré mais libsql n'est pas installé. "
-                "Installez les dépendances de requirements.txt."
+                "Bascule en mode Local-First sur SQLite local."
             )
-        # Mode Remote HTTP : connexion directe à Turso via l'URL libSQL.
-        # L'Embedded Replica (sync_url + db_path local) n'est PAS utilisé car
-        # Streamlit Community Cloud ne dispose pas d'un disque persistant et
-        # tenterait de télécharger l'intégralité de la base (~850 Mo) à chaque
-        # démarrage de container, provoquant un freeze systématique.
-        conn = _LibsqlConnection(
-            libsql.connect(
-                libsql_url,
-                auth_token=libsql_token,
-                autocommit=True,
-            ),
-            sync_enabled=False,
-        )
-    else:
+        else:
+            try:
+                # Mode Remote HTTP : tentative de connexion directe à Turso.
+                conn = _LibsqlConnection(
+                    libsql.connect(
+                        libsql_url,
+                        auth_token=libsql_token,
+                        autocommit=True,
+                    ),
+                    sync_enabled=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Échec de connexion Turso distante (%s). "
+                    "Bascule automatique en mode Local-First SQLite.",
+                    exc,
+                )
+                conn = None
+
+    if conn is None:
         conn = sqlite3.connect(str(db_path), timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    if not libsql_url:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        _apply_local_pragmas(conn)
         conn.execute("PRAGMA foreign_keys=OFF;")  # Géré manuellement selon l'ordre d'ingestion
-        conn.execute("PRAGMA busy_timeout=10000;")
+    conn.row_factory = sqlite3.Row
 
     resolved_path = f"{db_path}|{libsql_url or 'sqlite'}"
     if resolved_path not in _schema_synced_paths:
@@ -296,35 +346,41 @@ def execute_schema_file(conn: sqlite3.Connection, schema_file: Optional[Path | s
 
 def _make_read_connection(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
     """Connexion lecture seule optimisée (WAL, check_same_thread=False).
-    N'applique PAS le schéma — uniquement pour les vues."""
+    N'applique PAS le schéma — uniquement pour les vues.
+    Bascule automatiquement sur SQLite local en cas d'indisponibilité réseau."""
     if db_path is None:
         db_path = get_db_path()
+
+    conn = None
     libsql_url, libsql_token = _libsql_settings()
     if libsql_url:
-        if libsql is None:
-            raise RuntimeError(
-                "LIBSQL_URL est configuré mais libsql n'est pas installé."
-            )
-        # Mode Remote HTTP — cf. get_connection() pour la justification.
-        conn = _LibsqlConnection(
-            libsql.connect(
-                libsql_url,
-                auth_token=libsql_token,
-                autocommit=True,
-            ),
-            sync_enabled=False,
-        )
-    else:
+        if libsql is not None:
+            try:
+                conn = _LibsqlConnection(
+                    libsql.connect(
+                        libsql_url,
+                        auth_token=libsql_token,
+                        autocommit=True,
+                    ),
+                    sync_enabled=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Échec de connexion en lecture Turso (%s). "
+                    "Bascule automatique sur SQLite local.",
+                    exc,
+                )
+                conn = None
+
+    if conn is None:
         conn = sqlite3.connect(
             str(db_path),
             timeout=30.0,
             check_same_thread=False,  # nécessaire pour @st.cache_resource
         )
-    conn.row_factory = sqlite3.Row
-    if not libsql_url:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=10000;")
+        _apply_local_pragmas(conn)
         conn.execute("PRAGMA query_only=ON;")
+    conn.row_factory = sqlite3.Row
     return conn
 
 

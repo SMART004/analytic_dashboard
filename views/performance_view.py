@@ -399,26 +399,59 @@ def render_performance(context: PerformanceContext) -> None:
 
     display_table = display_with_total
     if context.segment == "commercial":
-        dsm_df_screen, cov_df_screen = _split_commercial_views(display_with_total)
-        col_view, _ = st.columns([3, 2])
+        dsm_df_screen, cov_wallet_screen, cov_no_wallet_screen = _split_commercial_views(display_with_total)
+        col_view, _ = st.columns([4, 1])
         with col_view:
             selected_view = st.radio(
                 "Vue affichée à l'écran :",
-                options=["complete", "dsm_activity", "taux_couverture"],
+                options=["complete", "dsm_activity", "cov_wallet", "cov_no_wallet"],
                 format_func=lambda v: {
                     "complete": "Vue Complète (Toutes colonnes)",
-                    "dsm_activity": "📊 Vue DSM Activity (Ventes, Dotation, TPW)",
-                    "taux_couverture": "🎯 Vue Taux de Couverture (Portefeuille & Taux)",
+                    "dsm_activity": "📊 DSM Activity",
+                    "cov_wallet": "🎯 Couverture - Wallet",
+                    "cov_no_wallet": "🎯 Couverture - No Wallet",
                 }[v],
                 horizontal=True,
                 key=f"perf_comm_view_mode",
             )
         if selected_view == "dsm_activity":
             display_table = dsm_df_screen
-        elif selected_view == "taux_couverture":
-            display_table = cov_df_screen
+        elif selected_view == "cov_wallet":
+            display_table = cov_wallet_screen
+        elif selected_view == "cov_no_wallet":
+            display_table = cov_no_wallet_screen
 
-    st.dataframe(_style_persistence(display_table), use_container_width=True, hide_index=True, height=600)
+    elif context.segment == "pr_caisse":
+        dsm_df_screen, cov_wallet_screen, cov_no_wallet_screen = _split_pr_caisse_views(display_with_total)
+        col_view, _ = st.columns([4, 1])
+        with col_view:
+            selected_view = st.radio(
+                "Vue affichée à l'écran :",
+                options=["complete", "dsm_activity", "cov_wallet", "cov_no_wallet"],
+                format_func=lambda v: {
+                    "complete": "Vue Complète (Toutes colonnes)",
+                    "dsm_activity": "📊 DSM Activity",
+                    "cov_wallet": "🎯 Couverture - Wallet",
+                    "cov_no_wallet": "🎯 Couverture - No Wallet",
+                }[v],
+                horizontal=True,
+                key=f"perf_pr_view_mode",
+            )
+        if selected_view == "dsm_activity":
+            display_table = dsm_df_screen
+        elif selected_view == "cov_wallet":
+            display_table = cov_wallet_screen
+        elif selected_view == "cov_no_wallet":
+            display_table = cov_no_wallet_screen
+
+    if context.segment == "cds":
+        st.dataframe(_style_cds_display(display_table), use_container_width=True, hide_index=True, height=600)
+    elif context.segment == "commercial":
+        st.dataframe(_style_commercial_display(display_table), use_container_width=True, hide_index=True, height=600)
+    elif context.segment == "pr_caisse":
+        st.dataframe(_style_pr_caisse_display(display_table), use_container_width=True, hide_index=True, height=600)
+    else:
+        st.dataframe(_style_persistence(display_table), use_container_width=True, hide_index=True, height=600)
 
     # Top 10 : commercial + pr_caisse uniquement (context.top_commerciaux est
     # vide pour cds par construction, jamais calculé côté controller).
@@ -426,11 +459,17 @@ def render_performance(context: PerformanceContext) -> None:
         st.markdown("#### Top 10")
         st.dataframe(_build_top10_display(context), use_container_width=True, hide_index=True)
 
+    # Espace d'analyse automatisée et synthèse terrain
+    _render_performance_insights(context, display_with_total)
+
     st.markdown("#### Export")
     export_df = _prepare_export_df(display_with_total, context.segment)
     if context.segment == "commercial":
         filter_sig = f"{context.filters.start_date}_{context.filters.end_date}_{context.filters.zone_centre}_{context.filters.zone_territoire}_{context.filters.zone_sa}_{getattr(context.filters, 'tr_mode', 'actifs')}"
         _render_commercial_exports(f"performance_{context.segment}", export_df, styles, group_col, filter_sig)
+    elif context.segment == "pr_caisse":
+        filter_sig = f"{context.filters.start_date}_{context.filters.end_date}_{context.filters.type_point}_{context.filters.territoire}"
+        _render_pr_caisse_exports(f"performance_{context.segment}", export_df, styles, group_col, filter_sig)
     else:
         _render_exports(f"performance_{context.segment}", export_df, styles, group_col)
 
@@ -466,12 +505,12 @@ def render_performance(context: PerformanceContext) -> None:
 # Construction des tableaux d'affichage par segment
 # ---------------------------------------------------------------------------
 
-def _build_display(context: PerformanceContext) -> tuple[pd.DataFrame, dict[str, Any], Optional[str]]:
+def _build_display(context: PerformanceContext) -> tuple[pd.DataFrame, dict[str, Any], Optional[Any]]:
     segment = context.segment
     if segment == "commercial":
-        return _build_commercial_display(context.table), _commercial_styles(), "Zone_Centre"
+        return _build_commercial_display(context.table), _commercial_styles(), ("Commercial", "Zone_Centre")
     if segment == "pr_caisse":
-        return _build_pr_caisse_display(context.table, type_point=context.filters.type_point), _pr_caisse_styles(), "Territoire"
+        return _build_pr_caisse_display(context.table, type_point=context.filters.type_point), _pr_caisse_styles(), ("Acteur", "Territoire")
     if segment == "cds":
         return _build_cds_display(context.table), _cds_styles(), None
     raise ValueError(f"Segment inconnu: {segment}")
@@ -483,126 +522,175 @@ def _build_commercial_display(table: pd.DataFrame) -> pd.DataFrame:
     df["Premiere_Trans"] = _col(df, "Premiere_Trans_min", float("nan")).apply(_minutes_to_time)
     df["Derniere_Trans"] = _col(df, "Derniere_Trans_min", float("nan")).apply(_minutes_to_time)
 
-    display = pd.DataFrame({
-        # Identité
-        "Zone_Centre": _col(df, "Zone_Centre", ""),
-        "Zone_SA": _col(df, "Zone_SA", ""),
-        "Commercial": _col(df, "Actor_Nom", ""),
-        "Num_Ccial": _col(df, "Actor_MSISDN", ""),
+    data = {
+        # Commercial
+        ("Commercial", "Zone_Centre"): _col(df, "Zone_Centre", ""),
+        ("Commercial", "Zone_SA"): _col(df, "Zone_SA", ""),
+        ("Commercial", "Nom"): _col(df, "Actor_Nom", ""),
+        ("Commercial", "Numero"): _col(df, "Actor_MSISDN", "").astype(str),
 
-        # Activité & Dotation
-        "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
-        "H_Dotation": df["Heure_Dotation"],
-        "Dotation": _to_int(_col(df, "Dotation_Montant", 0)),
-        "FU": _to_int(_col(df, "FU", 0)),
-        "1ere_Trans": df["Premiere_Trans"],
-        "Dern_Trans": df["Derniere_Trans"],
-        "Nb_Trans": _to_int(_col(df, "Nb_Transactions", 0)),
+        # Temps & Activité
+        ("Temps & Activité", "Nb_Jours"): _to_int(_col(df, "Nb_Jours", 0)),
+        ("Temps & Activité", "1ere_Trans"): df["Premiere_Trans"],
+        ("Temps & Activité", "Dern_Trans"): df["Derniere_Trans"],
+        ("Temps & Activité", "Nb_Trans"): _to_int(_col(df, "Nb_Transactions", 0)),
 
-        # Segment HVC
-        "FD_HVC": _to_int(_col(df, "FD_HVC", 0)),
-        "HVC_Wallet": _to_int(_col(df, "HVC_Wallet", 0)),
-        "HVC_No_Wallet": _to_int(_col(df, "HVC_No_Wallet", 0)),
-        "Σ_HVC_Serve": _to_int(_col(df, "Sigma_HVC_Serve", 0)),
-        "TR_HVC_Wallet (%)": _to_num(_col(df, "TR_HVC_Wallet", 0)),
-        "TR_HVC_No_Wallet (%)": _to_num(_col(df, "TR_HVC_No_Wallet", 0)),
-        "TR_HVC_General (%)": _to_num(_col(df, "TR_HVC_General", 0)),
+        # Dotation & Trésorerie
+        ("Dotation & Trésorerie", "Heure"): df["Heure_Dotation"],
+        ("Dotation & Trésorerie", "Montant"): _to_int(_col(df, "Dotation_Montant", 0)),
+        ("Dotation & Trésorerie", "FU"): _to_int(_col(df, "FU", 0)),
 
-        # Segment Others (MVC/LVC)
-        "FD_Others": _to_int(_col(df, "FD_Others", 0)),
-        "Others_Wallet": _to_int(_col(df, "Others_Wallet", 0)),
-        "Others_No_Wallet": _to_int(_col(df, "Others_No_Wallet", 0)),
-        "Σ_Others_Serve": _to_int(_col(df, "Sigma_Others_Serve", 0)),
-        "TR_Others_Wallet (%)": _to_num(_col(df, "TR_Others_Wallet", 0)),
-        "TR_Others_No_Wallet (%)": _to_num(_col(df, "TR_Others_No_Wallet", 0)),
-        "TR_Others_General (%)": _to_num(_col(df, "TR_Others_General", 0)),
+        # HVC_Wallet
+        ("HVC_Wallet", "Served"): _to_int(_col(df, "HVC_Wallet", 0)),
+        ("HVC_Wallet", "FD"): _to_int(_col(df, "FD_HVC_Wallet", 0)),
+        ("HVC_Wallet", "TR_(%)"): _to_num(_col(df, "TR_HVC_Wallet", 0)),
 
-        # Synthèse POS & Portefeuille
-        "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
-        "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
-        "HVC_Attrib": _to_int(_col(df, "POS_Attribues_HVC", 0)),
-        "Others_Attrib": _to_int(_col(df, "POS_Attribues_Others", 0)),
-        "Tot_Attrib": _to_int(_col(df, "POS_Attribues", 0)),
-        "POS_Touches": _to_int(_col(df, "POS_Touches", 0)),
+        # HVC_No_Wallet
+        ("HVC_No_Wallet", "Served"): _to_int(_col(df, "HVC_No_Wallet", 0)),
+        ("HVC_No_Wallet", "FD"): _to_int(_col(df, "FD_HVC_No_Wallet", 0)),
+        ("HVC_No_Wallet", "TR_(%)"): _to_num(_col(df, "TR_HVC_No_Wallet", 0)),
 
-        # Couvertures & Taux
-        "Couv_Tot (%)": _to_num(_col(df, "Taux_Couverture", 0)),
-        "Couv_HVC (%)": _to_num(_col(df, "Taux_Couverture_HVC", 0)),
-        "Couv_Others (%)": _to_num(_col(df, "Taux_Couverture_Others", 0)),
-        "Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
-        "TR_General (%)": _to_num(_col(df, "TR_General", 0)),
-    })
+        # HVC (Total)
+        ("HVC", "Served"): _to_int(_col(df, "HVC_Total_Served", _col(df, "Sigma_HVC_Serve", 0))),
+        ("HVC", "FD"): _to_int(_col(df, "FD_HVC_Total", _col(df, "FD_HVC", 0))),
+        ("HVC", "TR_(%)"): _to_num(_col(df, "TR_HVC_General", 0)),
+
+        # Others_Wallet
+        ("Others_Wallet", "Served"): _to_int(_col(df, "Others_Wallet", 0)),
+        ("Others_Wallet", "FD"): _to_int(_col(df, "FD_Others_Wallet", 0)),
+        ("Others_Wallet", "TR_(%)"): _to_num(_col(df, "TR_Others_Wallet", 0)),
+
+        # Others_No_Wallet
+        ("Others_No_Wallet", "Served"): _to_int(_col(df, "Others_No_Wallet", 0)),
+        ("Others_No_Wallet", "FD"): _to_int(_col(df, "FD_Others_No_Wallet", 0)),
+        ("Others_No_Wallet", "TR_(%)"): _to_num(_col(df, "TR_Others_No_Wallet", 0)),
+
+        # Others (Total)
+        ("Others", "Served"): _to_int(_col(df, "Others_Total_Served", _col(df, "Sigma_Others_Serve", 0))),
+        ("Others", "FD"): _to_int(_col(df, "FD_Others_Total", _col(df, "FD_Others", 0))),
+        ("Others", "TR_(%)"): _to_num(_col(df, "TR_Others_General", 0)),
+
+        # Synthèse Ventes & POS
+        ("Synthèse Ventes & POS", "Somme_POS_Serve"): _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        ("Synthèse Ventes & POS", "Somme_FD"): _to_int(_col(df, "Sigma_FD", 0)),
+        ("Synthèse Ventes & POS", "TR_General_(%)"): _to_num(_col(df, "TR_General", 0)),
+
+        # Objectifs & Couverture
+        ("Objectifs & Couverture", "HVC_Attrib"): _to_int(_col(df, "POS_Attribues_HVC", 0)),
+        ("Objectifs & Couverture", "Others_Attrib"): _to_int(_col(df, "POS_Attribues_Others", 0)),
+        ("Objectifs & Couverture", "Tot_Attrib"): _to_int(_col(df, "POS_Attribues", 0)),
+        ("Objectifs & Couverture", "POS_Touches"): _to_int(_col(df, "POS_Touches", 0)),
+        ("Objectifs & Couverture", "Couv_HVC_(%)"): _to_num(_col(df, "Taux_Couverture_HVC", 0)),
+        ("Objectifs & Couverture", "Couv_Others_(%)"): _to_num(_col(df, "Taux_Couverture_Others", 0)),
+        ("Objectifs & Couverture", "Couv_Tot_(%)"): _to_num(_col(df, "Taux_Couverture", 0)),
+        ("Objectifs & Couverture", "Persistance_(%)"): pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
+    }
 
     for label in WORK_PROGRESS_LABELS:
         serve_col, tr_col = f"HVC Serve {label}", f"TR_HVC {label}"
         other_serve_col, other_tr_col = f"Other Serve {label}", f"TR_Other {label}"
-        display[f"TPW {label}"] = (
+        data[("Work Progress", label)] = (
             _to_int(_col(df, serve_col, 0)).astype(str) + " | "
             + _to_num(_col(df, tr_col, 0)).round(1).astype(str) + "% | "
             + _to_int(_col(df, other_serve_col, 0)).astype(str) + " | "
             + _to_num(_col(df, other_tr_col, 0)).round(1).astype(str) + "%"
         )
 
-    return display.sort_values(["Zone_Centre", "Zone_SA", "Commercial"]).reset_index(drop=True)
+    multi_df = pd.DataFrame(data)
+    multi_df.columns = pd.MultiIndex.from_tuples(multi_df.columns)
+    return multi_df.sort_values([("Commercial", "Zone_Centre"), ("Commercial", "Zone_SA"), ("Commercial", "Nom")]).reset_index(drop=True)
 
 
 def _build_pr_caisse_display(table: pd.DataFrame, type_point: str = "Tous") -> pd.DataFrame:
     df = table.copy()
-    display = pd.DataFrame({
-        "Territoire": _col(df, "Territoire", ""),
-        "Localisation": _col(df, "Localisation", ""),
-        "Nom": _col(df, "Actor_Nom", ""),
-        "Type": _col(df, "Type_Point", ""),
-        "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
-        "FD_HVC": _to_int(_col(df, "FD_HVC", 0)),
-        "HVC_Serve": _to_int(_col(df, "HVC_Serve", 0)),
-        "FD_Others": _to_int(_col(df, "FD_Others", 0)),
-        "Other_Serve": _to_int(_col(df, "Other_Serve", 0)),
-        "Hors_Portefeuille_POS": _to_int(_col(df, "Hors_Portefeuille_POS", 0)),
-        "FD_Hors_Portefeuille": _to_int(_col(df, "FD_Hors_Portefeuille", 0)),
-        "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
-        "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
-        "POS_Touches": _to_int(_col(df, "POS_Touches", 0)),
-        "POS_Attribues": _to_int(_col(df, "POS_Attribues", 0)),
-        "Taux_Couverture (%)": _to_num(_col(df, "Taux_Couverture", 0)),
-        "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
-        "Dotation_Nom": _col(df, "Dotation_Nom", ""),
-        "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
-        "FU (Float Up)": _to_int(_col(df, "FU", 0)),
-    })
+    data = {
+        # Acteur
+        ("Acteur", "Type"): _col(df, "Type_Point", ""),
+        ("Acteur", "Territoire"): _col(df, "Territoire", ""),
+        ("Acteur", "Localisation"): _col(df, "Localisation", ""),
+        ("Acteur", "Nom"): _col(df, "Actor_Nom", ""),
+
+        # Temps
+        ("Temps", "Nb_Jours"): _to_int(_col(df, "Nb_Jours", 0)),
+
+        # Dotation & Trésorerie
+        ("Dotation & Trésorerie", "Nom"): _col(df, "Dotation_Nom", ""),
+        ("Dotation & Trésorerie", "Montant"): _to_int(_col(df, "Dotation_Montant", 0)),
+        ("Dotation & Trésorerie", "Float_Up"): _to_int(_col(df, "FU", 0)),
+
+        # HVC_Wallet
+        ("HVC_Wallet", "Served"): _to_int(_col(df, "HVC_Wallet", _col(df, "HVC_Serve", 0))),
+        ("HVC_Wallet", "FD"): _to_int(_col(df, "FD_HVC_Wallet", _col(df, "FD_HVC", 0))),
+
+        # HVC_No_Wallet
+        ("HVC_No_Wallet", "Served"): _to_int(_col(df, "HVC_No_Wallet", 0)),
+        ("HVC_No_Wallet", "FD"): _to_int(_col(df, "FD_HVC_No_Wallet", 0)),
+
+        # HVC (Total)
+        ("HVC", "Served"): _to_int(_col(df, "HVC_Total_Served", _col(df, "HVC_Serve", 0))),
+        ("HVC", "FD"): _to_int(_col(df, "FD_HVC_Total", _col(df, "FD_HVC", 0))),
+
+        # Others_Wallet
+        ("Others_Wallet", "Served"): _to_int(_col(df, "Others_Wallet", _col(df, "Other_Serve", 0))),
+        ("Others_Wallet", "FD"): _to_int(_col(df, "FD_Others_Wallet", _col(df, "FD_Others", 0))),
+
+        # Others_No_Wallet
+        ("Others_No_Wallet", "Served"): _to_int(_col(df, "Others_No_Wallet", 0)),
+        ("Others_No_Wallet", "FD"): _to_int(_col(df, "FD_Others_No_Wallet", 0)),
+
+        # Others (Total)
+        ("Others", "Served"): _to_int(_col(df, "Others_Total_Served", _col(df, "Other_Serve", 0))),
+        ("Others", "FD"): _to_int(_col(df, "FD_Others_Total", _col(df, "FD_Others", 0))),
+
+        # Synthèse POS & Finances
+        ("Synthèse POS & Finances", "Somme_POS_Serve"): _to_int(_col(df, "Sigma_POS_Serve", 0)),
+        ("Synthèse POS & Finances", "Somme_FD"): _to_int(_col(df, "Sigma_FD", 0)),
+
+        # Objectifs & Couverture
+        ("Objectifs & Couverture", "POS_Attribues"): _to_int(_col(df, "POS_Attribues", 0)),
+        ("Objectifs & Couverture", "POS_Touches"): _to_int(_col(df, "POS_Touches", 0)),
+        ("Objectifs & Couverture", "Taux_Couverture_(%)"): _to_num(_col(df, "Taux_Couverture", 0.0)),
+        ("Objectifs & Couverture", "Taux_Persistance_(%)"): pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
+    }
+
+    multi_df = pd.DataFrame(data)
+    multi_df.columns = pd.MultiIndex.from_tuples(multi_df.columns)
 
     if type_point == "Caisses" or (not df.empty and "Type_Point" in df.columns and (df["Type_Point"] == "Caisses").all()):
-        display = display.drop(columns=["Dotation_Nom", "Dotation_Montant"], errors="ignore")
+        cols_to_drop = [
+            ("Dotation & Trésorerie", "Nom"), ("Dotation & Trésorerie", "Montant"),
+            ("Objectifs & Couverture", "POS_Attribues"), ("Objectifs & Couverture", "POS_Touches"),
+            ("Objectifs & Couverture", "Taux_Couverture_(%)"), ("Objectifs & Couverture", "Taux_Persistance_(%)"),
+        ]
+        multi_df = multi_df.drop(columns=[c for c in cols_to_drop if c in multi_df.columns], errors="ignore")
 
-    return display.sort_values(["Type", "Territoire", "Nom"]).reset_index(drop=True)
+    return multi_df.sort_values([("Acteur", "Type"), ("Acteur", "Territoire"), ("Acteur", "Nom")]).reset_index(drop=True)
 
 
 def _build_cds_display(table: pd.DataFrame) -> pd.DataFrame:
     df = table.copy()
-    quota_pct = _col(df, "Taux_Couverture_Quota", None)
-    quota_str = quota_pct.apply(lambda v: f"{v:.1f}%" if pd.notna(v) else "N/A")
-
-    display = pd.DataFrame({
-        "CDS": _col(df, "Actor_Nom", ""),
-        "Nb_Jours": _to_int(_col(df, "Nb_Jours", 0)),
-        "FD_HVC": _to_int(_col(df, "FD_HVC", 0)),
-        "HVC_Serve": _to_int(_col(df, "HVC_Serve", 0)),
-        "Hors_Portefeuille_HVC_POS": _to_int(_col(df, "Hors_Portefeuille_POS", 0)),
-        "FD_Hors_Portefeuille_HVC": _to_int(_col(df, "FD_Hors_Portefeuille", 0)),
-        "Σ_FD": _to_int(_col(df, "Sigma_FD", 0)),
-        "Σ_POS_Serve": _to_int(_col(df, "Sigma_POS_Serve", 0)),
-        "FD_Commercial": _to_int(_col(df, "FD_Commercial", 0)),
-        "Ccial_Serve": _to_int(_col(df, "Ccial_Serve", 0)),
-        "Taux_Persistance (%)": pd.to_numeric(_col(df, "Taux_Persistance", float("nan")), errors="coerce"),
-        "Nb_HVC_Attribue": _to_int(_col(df, "nb_hvc_attribue", 0)),
-        "Taux_Couverture_Quota": quota_str,
-        # POS_serve/Nouveaux [14h-17h] retires : plus calcules pour CDS
-        # cote controller (Bloquant 1), les afficher serait trompeur (0 partout).
-        "Dotation_Nom": _col(df, "Dotation_Nom", ""),
-        "Dotation_Montant": _to_int(_col(df, "Dotation_Montant", 0)),
-        "FU (Float Up)": _to_int(_col(df, "FU", 0)),
-    })
-    return display.sort_values(["CDS"]).reset_index(drop=True)
+    data = {
+        ("CDS", "Nom"): _col(df, "Actor_Nom", ""),
+        ("CDS", "Numero"): _col(df, "Actor_MSISDN", "").astype(str),
+        ("Temps", "Nb_Jours"): _to_int(_col(df, "Nb_Jours", 0)),
+        ("HVC_Wallet", "Served"): _to_int(_col(df, "HVC_Wallet_Served", 0)),
+        ("HVC_Wallet", "FD"): _to_int(_col(df, "HVC_Wallet_FD", 0)),
+        ("HVC_No_Wallet", "Served"): _to_int(_col(df, "HVC_No_Wallet_Served", 0)),
+        ("HVC_No_Wallet", "FD"): _to_int(_col(df, "HVC_No_Wallet_FD", 0)),
+        ("Others", "Served"): _to_int(_col(df, "Others_Served", 0)),
+        ("Others", "FD"): _to_int(_col(df, "Others_FD", 0)),
+        ("Synthèse POS", "Somme_POS_Serve"): _to_int(_col(df, "Somme_POS_Serve", 0)),
+        ("Commerciaux", "Served"): _to_int(_col(df, "Ccial_Serve", 0)),
+        ("Commerciaux", "FD"): _to_int(_col(df, "FD_Commercial", 0)),
+        ("Finances", "Somme_FD"): _to_int(_col(df, "Somme_FD", 0)),
+        ("Objectifs & Suivi", "Nb_HVC_Attribue"): _to_int(_col(df, "Nb_HVC_Attribue", 0)),
+        ("Objectifs & Suivi", "Taux_Couverture_(%)"): _to_num(_col(df, "Taux_Couverture_Quota", 0.0)),
+        ("Dotation", "Nom"): _col(df, "Dotation_Nom", ""),
+        ("Dotation", "Montant"): _to_int(_col(df, "Dotation_Montant", 0)),
+    }
+    multi_df = pd.DataFrame(data)
+    multi_df.columns = pd.MultiIndex.from_tuples(multi_df.columns)
+    return multi_df.sort_values([("CDS", "Nom")]).reset_index(drop=True)
 
 
 def _prepare_export_df(df: pd.DataFrame, segment: str) -> pd.DataFrame:
@@ -610,12 +698,13 @@ def _prepare_export_df(df: pd.DataFrame, segment: str) -> pd.DataFrame:
         return df.drop(columns=_CDS_DISPLAY_ONLY_COLUMNS, errors="ignore")
     if segment == "pr_caisse":
         non_total = df[~df.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
-        if not non_total.empty and "Type" in non_total.columns and (non_total["Type"] == "Caisses").all():
+        if not non_total.empty and ("Acteur", "Type") in non_total.columns and (non_total[("Acteur", "Type")] == "Caisses").all():
             cols_to_drop = [
-                "POS_Touches", "POS_Attribues", "Taux_Couverture (%)", "Taux_Persistance (%)",
-                "Hors_Portefeuille_POS", "FD_Hors_Portefeuille"
+                ("Dotation & Trésorerie", "Nom"), ("Dotation & Trésorerie", "Montant"),
+                ("Objectifs & Couverture", "POS_Attribues"), ("Objectifs & Couverture", "POS_Touches"),
+                ("Objectifs & Couverture", "Taux_Couverture_(%)"), ("Objectifs & Couverture", "Taux_Persistance_(%)"),
             ]
-            return df.drop(columns=cols_to_drop, errors="ignore")
+            return df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
     return df
 
 
@@ -643,45 +732,107 @@ def _append_total_row(
     if display_df.empty:
         return display_df
 
-    label_col = display_df.columns[0]
-    total: dict[str, Any] = {col: "" for col in display_df.columns}
-    total[label_col] = "TOTAL"
+    if segment == "cds":
+        total_dict = {col: "" for col in display_df.columns}
+        total_dict[("CDS", "Nom")] = "TOTAL"
 
-    rate_cols = {
-        "TR_HVC_Wallet (%)", "TR_HVC_No_Wallet (%)", "TR_HVC_General (%)",
-        "TR_Others_Wallet (%)", "TR_Others_No_Wallet (%)", "TR_Others_General (%)",
-        "TR_General (%)", "TR_HVC (%)", "TR_Other (%)",
-        "Couv_Tot (%)", "Couv_HVC (%)", "Couv_Others (%)",
-        "Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)",
-        "Persistance (%)", "Taux_Persistance (%)",
-    }
-    for col in display_df.select_dtypes(include="number").columns:
-        if col in rate_cols:
-            total[col] = None
-            continue
-        total[col] = display_df[col].sum()
+        filters = getattr(context, "filters", None)
+        if filters and filters.start_date and filters.end_date:
+            try:
+                d_start = pd.to_datetime(filters.start_date).date()
+                d_end = pd.to_datetime(filters.end_date).date()
+                nb_jours_total = max((d_end - d_start).days + 1, 1)
+            except Exception:
+                nb_jours_total = 1
+        else:
+            nb_jours_total = 1
+        total_dict[("Temps", "Nb_Jours")] = int(nb_jours_total)
 
-    # Recalcul des Taux de Réalisation (TR) et Couverture pour les commerciaux
+        for col in [
+            ("HVC_Wallet", "Served"),
+            ("HVC_Wallet", "FD"),
+            ("HVC_No_Wallet", "Served"),
+            ("HVC_No_Wallet", "FD"),
+            ("Others", "Served"),
+            ("Others", "FD"),
+            ("Synthèse POS", "Somme_POS_Serve"),
+            ("Commerciaux", "Served"),
+            ("Commerciaux", "FD"),
+            ("Finances", "Somme_FD"),
+            ("Objectifs & Suivi", "Nb_HVC_Attribue"),
+            ("Dotation", "Montant"),
+        ]:
+            if col in display_df.columns:
+                total_dict[col] = int(pd.to_numeric(display_df[col], errors="coerce").fillna(0).sum())
+
+        hvc_wallet_served_tot = total_dict.get(("HVC_Wallet", "Served"), 0)
+        hvc_attribue_tot = total_dict.get(("Objectifs & Suivi", "Nb_HVC_Attribue"), 0)
+        if hvc_attribue_tot > 0:
+            total_dict[("Objectifs & Suivi", "Taux_Couverture_(%)")] = round(hvc_wallet_served_tot / hvc_attribue_tot * 100, 1)
+        else:
+            total_dict[("Objectifs & Suivi", "Taux_Couverture_(%)")] = 0.0
+
+        total_row_df = pd.DataFrame([total_dict], columns=display_df.columns)
+        return pd.concat([display_df, total_row_df], ignore_index=True)
+
     if segment == "commercial":
-        table = context.table if (context is not None and not context.table.empty) else None
+        label_col = ("Commercial", "Zone_Centre")
+        total_dict = {col: "" for col in display_df.columns}
+        total_dict[label_col] = "TOTAL"
 
-        if table is not None:
-            ctx_filters = getattr(context, "filters", None) if context is not None else None
-            is_ouvres_mode = (
-                ctx_filters is not None
-                and getattr(ctx_filters, "tr_mode", "actifs") == "ouvres_26j"
+        num_sum_cols = [
+            ("Dotation & Trésorerie", "Montant"),
+            ("Dotation & Trésorerie", "FU"),
+            ("Temps & Activité", "Nb_Trans"),
+            ("HVC_Wallet", "Served"),
+            ("HVC_Wallet", "FD"),
+            ("HVC_No_Wallet", "Served"),
+            ("HVC_No_Wallet", "FD"),
+            ("HVC", "Served"),
+            ("HVC", "FD"),
+            ("Others_Wallet", "Served"),
+            ("Others_Wallet", "FD"),
+            ("Others_No_Wallet", "Served"),
+            ("Others_No_Wallet", "FD"),
+            ("Others", "Served"),
+            ("Others", "FD"),
+            ("Synthèse Ventes & POS", "Somme_POS_Serve"),
+            ("Synthèse Ventes & POS", "Somme_FD"),
+            ("Objectifs & Couverture", "HVC_Attrib"),
+            ("Objectifs & Couverture", "Others_Attrib"),
+            ("Objectifs & Couverture", "Tot_Attrib"),
+            ("Objectifs & Couverture", "POS_Touches"),
+        ]
+        for col in num_sum_cols:
+            if col in display_df.columns:
+                total_dict[col] = int(pd.to_numeric(display_df[col], errors="coerce").fillna(0).sum())
+
+        for hour_col in [("Dotation & Trésorerie", "Heure"), ("Temps & Activité", "1ere_Trans"), ("Temps & Activité", "Dern_Trans")]:
+            if hour_col in display_df.columns:
+                valid_mins = display_df[hour_col].apply(_time_str_to_minutes).dropna()
+                total_dict[hour_col] = _minutes_to_time(valid_mins.mean()) if not valid_mins.empty else "N/A"
+
+        ctx_filters = getattr(context, "filters", None) if context is not None else None
+        is_ouvres_mode = (
+            ctx_filters is not None
+            and getattr(ctx_filters, "tr_mode", "actifs") == "ouvres_26j"
+        )
+        if is_ouvres_mode:
+            nb_ouvres = (
+                context.table["Nb_Jours_Ouvres"].iloc[0]
+                if (context is not None and not context.table.empty and "Nb_Jours_Ouvres" in context.table.columns and not context.table["Nb_Jours_Ouvres"].empty)
+                else count_working_days_6j(getattr(ctx_filters, "start_date", None), getattr(ctx_filters, "end_date", None))
             )
+            if ("Temps & Activité", "Nb_Jours") in display_df.columns:
+                total_dict[("Temps & Activité", "Nb_Jours")] = int(nb_ouvres)
+        else:
+            if ("Temps & Activité", "Nb_Jours") in display_df.columns:
+                total_dict[("Temps & Activité", "Nb_Jours")] = int(pd.to_numeric(display_df[("Temps & Activité", "Nb_Jours")], errors="coerce").fillna(0).max())
+
+        table = context.table if (context is not None and not context.table.empty) else None
+        if table is not None:
             if is_ouvres_mode:
-                nb_ouvres = (
-                    table["Nb_Jours_Ouvres"].iloc[0]
-                    if "Nb_Jours_Ouvres" in table.columns and not table["Nb_Jours_Ouvres"].empty
-                    else count_working_days_6j(
-                        getattr(ctx_filters, "start_date", None),
-                        getattr(ctx_filters, "end_date", None),
-                    )
-                )
                 nb_jours = pd.Series(float(nb_ouvres), index=table.index, dtype=float)
-                total["Nb_Jours"] = int(nb_ouvres)
             else:
                 nb_jours = pd.to_numeric(_col(table, "Nb_Jours_Actifs", _col(table, "Nb_Jours", 1)), errors="coerce").replace(0, np.nan).fillna(1)
 
@@ -693,12 +844,11 @@ def _append_total_row(
                 cible = (serve * nb_jours * 3).sum()
                 return round((nb_trans / cible * 100), 1) if cible > 0 else 0.0
 
-            # TR HVC
-            if "TR_HVC_Wallet (%)" in display_df.columns:
-                total["TR_HVC_Wallet (%)"] = _calc_tr_table("Nb_Trans_HVC_Wallet", "HVC_Wallet")
-            if "TR_HVC_No_Wallet (%)" in display_df.columns:
-                total["TR_HVC_No_Wallet (%)"] = _calc_tr_table("Nb_Trans_HVC_No_Wallet", "HVC_No_Wallet")
-            if "TR_HVC_General (%)" in display_df.columns:
+            if ("HVC_Wallet", "TR_(%)") in display_df.columns:
+                total_dict[("HVC_Wallet", "TR_(%)")] = _calc_tr_table("Nb_Trans_HVC_Wallet", "HVC_Wallet")
+            if ("HVC_No_Wallet", "TR_(%)") in display_df.columns:
+                total_dict[("HVC_No_Wallet", "TR_(%)")] = _calc_tr_table("Nb_Trans_HVC_No_Wallet", "HVC_No_Wallet")
+            if ("HVC", "TR_(%)") in display_df.columns:
                 tr_val = _calc_tr_table("Nb_Trans_HVC", "Sigma_HVC_Serve")
                 if tr_val == 0.0:
                     nb_trans_hvc = (
@@ -708,16 +858,13 @@ def _append_total_row(
                     serve_hvc = pd.to_numeric(_col(table, "Sigma_HVC_Serve", 0), errors="coerce").fillna(0)
                     cible_hvc = (serve_hvc * nb_jours * 3).sum()
                     tr_val = round((nb_trans_hvc / cible_hvc * 100), 1) if cible_hvc > 0 else 0.0
-                total["TR_HVC_General (%)"] = tr_val
-            if "TR_HVC (%)" in display_df.columns:
-                total["TR_HVC (%)"] = total.get("TR_HVC_General (%)", 0.0)
+                total_dict[("HVC", "TR_(%)")] = tr_val
 
-            # TR Others
-            if "TR_Others_Wallet (%)" in display_df.columns:
-                total["TR_Others_Wallet (%)"] = _calc_tr_table("Nb_Trans_Others_Wallet", "Others_Wallet")
-            if "TR_Others_No_Wallet (%)" in display_df.columns:
-                total["TR_Others_No_Wallet (%)"] = _calc_tr_table("Nb_Trans_Others_No_Wallet", "Others_No_Wallet")
-            if "TR_Others_General (%)" in display_df.columns:
+            if ("Others_Wallet", "TR_(%)") in display_df.columns:
+                total_dict[("Others_Wallet", "TR_(%)")] = _calc_tr_table("Nb_Trans_Others_Wallet", "Others_Wallet")
+            if ("Others_No_Wallet", "TR_(%)") in display_df.columns:
+                total_dict[("Others_No_Wallet", "TR_(%)")] = _calc_tr_table("Nb_Trans_Others_No_Wallet", "Others_No_Wallet")
+            if ("Others", "TR_(%)") in display_df.columns:
                 tr_val_oth = _calc_tr_table("Nb_Trans_Other", "Sigma_Others_Serve")
                 if tr_val_oth == 0.0:
                     nb_trans_oth = (
@@ -727,12 +874,9 @@ def _append_total_row(
                     serve_oth = pd.to_numeric(_col(table, "Sigma_Others_Serve", 0), errors="coerce").fillna(0)
                     cible_oth = (serve_oth * nb_jours * 3).sum()
                     tr_val_oth = round((nb_trans_oth / cible_oth * 100), 1) if cible_oth > 0 else 0.0
-                total["TR_Others_General (%)"] = tr_val_oth
-            if "TR_Other (%)" in display_df.columns:
-                total["TR_Other (%)"] = total.get("TR_Others_General (%)", 0.0)
+                total_dict[("Others", "TR_(%)")] = tr_val_oth
 
-            # TR General Total
-            if "TR_General (%)" in display_df.columns:
+            if ("Synthèse Ventes & POS", "TR_General_(%)") in display_df.columns:
                 tr_gen_val = _calc_tr_table("Nb_Transactions", "Sigma_POS_Serve")
                 if tr_gen_val == 0.0:
                     nb_trans_gen = (
@@ -744,141 +888,118 @@ def _append_total_row(
                     serve_all = pd.to_numeric(_col(table, "Sigma_POS_Serve", 0), errors="coerce").fillna(0)
                     cible_all = (serve_all * nb_jours * 3).sum()
                     tr_gen_val = round((nb_trans_gen / cible_all * 100), 1) if cible_all > 0 else 0.0
-                total["TR_General (%)"] = tr_gen_val
+                total_dict[("Synthèse Ventes & POS", "TR_General_(%)")] = tr_gen_val
 
-            # Couvertures
-            if "Couv_Tot (%)" in display_df.columns or "Taux_Couverture (%)" in display_df.columns:
-                tot_attr = pd.to_numeric(_col(table, "POS_Attribues", 0), errors="coerce").fillna(0).sum()
-                tot_touch = pd.to_numeric(_col(table, "POS_Touches", 0), errors="coerce").fillna(0).sum()
-                c_val = round(tot_touch / tot_attr * 100, 1) if tot_attr > 0 else 0.0
-                if "Couv_Tot (%)" in display_df.columns:
-                    total["Couv_Tot (%)"] = c_val
-                if "Taux_Couverture (%)" in display_df.columns:
-                    total["Taux_Couverture (%)"] = c_val
-
-            if "Couv_HVC (%)" in display_df.columns or "Taux_Couverture_HVC (%)" in display_df.columns:
-                tot_attr_hvc = pd.to_numeric(_col(table, "POS_Attribues_HVC", 0), errors="coerce").fillna(0).sum()
-                tot_touch_hvc = pd.to_numeric(_col(table, "POS_Touches_HVC", 0), errors="coerce").fillna(0).sum()
-                c_hvc = round(tot_touch_hvc / tot_attr_hvc * 100, 1) if tot_attr_hvc > 0 else 0.0
-                if "Couv_HVC (%)" in display_df.columns:
-                    total["Couv_HVC (%)"] = c_hvc
-                if "Taux_Couverture_HVC (%)" in display_df.columns:
-                    total["Taux_Couverture_HVC (%)"] = c_hvc
-
-            if "Couv_Others (%)" in display_df.columns or "Taux_Couverture_Autres(MVC/LVC) (%)" in display_df.columns:
-                tot_attr_oth = pd.to_numeric(_col(table, "POS_Attribues_Others", 0), errors="coerce").fillna(0).sum()
-                tot_touch_oth = pd.to_numeric(_col(table, "POS_Touches_Others", 0), errors="coerce").fillna(0).sum()
-                c_oth = round(tot_touch_oth / tot_attr_oth * 100, 1) if tot_attr_oth > 0 else 0.0
-                if "Couv_Others (%)" in display_df.columns:
-                    total["Couv_Others (%)"] = c_oth
-                if "Taux_Couverture_Autres(MVC/LVC) (%)" in display_df.columns:
-                    total["Taux_Couverture_Autres(MVC/LVC) (%)"] = c_oth
-
-        else:
-            # Fallback if table is None
-            ctx_filters = getattr(context, "filters", None) if context is not None else None
-            is_ouvres_mode = (
-                ctx_filters is not None
-                and getattr(ctx_filters, "tr_mode", "actifs") == "ouvres_26j"
-            )
-            if is_ouvres_mode:
-                nb_ouvres = count_working_days_6j(
-                    getattr(ctx_filters, "start_date", None),
-                    getattr(ctx_filters, "end_date", None),
-                )
-                nb_jours = pd.Series(float(nb_ouvres), index=display_df.index, dtype=float)
-                total["Nb_Jours"] = int(nb_ouvres)
-            else:
-                nb_jours = pd.to_numeric(_col(display_df, "Nb_Jours", 1), errors="coerce").replace(0, np.nan).fillna(1)
-            def _calc_tr_display(rate_col_name: str, serve_col_name: str) -> float:
-                if rate_col_name not in display_df.columns or serve_col_name not in display_df.columns:
-                    return 0.0
-                serve = pd.to_numeric(display_df[serve_col_name], errors="coerce").fillna(0)
-                cible = (serve * nb_jours * 3).sum()
-                tr_s = pd.to_numeric(display_df[rate_col_name], errors="coerce").fillna(0)
-                nb_trans = (tr_s * serve * nb_jours * 3 / 100).sum()
-                return round((nb_trans / cible * 100), 1) if cible > 0 else 0.0
-
-            if "TR_HVC_Wallet (%)" in display_df.columns:
-                total["TR_HVC_Wallet (%)"] = _calc_tr_display("TR_HVC_Wallet (%)", "HVC_Wallet")
-            if "TR_HVC_No_Wallet (%)" in display_df.columns:
-                total["TR_HVC_No_Wallet (%)"] = _calc_tr_display("TR_HVC_No_Wallet (%)", "HVC_No_Wallet")
-            if "TR_HVC_General (%)" in display_df.columns:
-                total["TR_HVC_General (%)"] = _calc_tr_display("TR_HVC_General (%)", "Σ_HVC_Serve")
-            if "TR_Others_Wallet (%)" in display_df.columns:
-                total["TR_Others_Wallet (%)"] = _calc_tr_display("TR_Others_Wallet (%)", "Others_Wallet")
-            if "TR_Others_No_Wallet (%)" in display_df.columns:
-                total["TR_Others_No_Wallet (%)"] = _calc_tr_display("TR_Others_No_Wallet (%)", "Others_No_Wallet")
-            if "TR_Others_General (%)" in display_df.columns:
-                total["TR_Others_General (%)"] = _calc_tr_display("TR_Others_General (%)", "Σ_Others_Serve")
-            if "TR_General (%)" in display_df.columns:
-                total["TR_General (%)"] = _calc_tr_display("TR_General (%)", "Σ_POS_Serve")
-
-            if "Couv_Tot (%)" in display_df.columns:
-                tot_attr = pd.to_numeric(_col(display_df, "Tot_Attrib", 0), errors="coerce").fillna(0).sum()
-                tot_touch = pd.to_numeric(_col(display_df, "POS_Touches", 0), errors="coerce").fillna(0).sum()
-                total["Couv_Tot (%)"] = round(tot_touch / tot_attr * 100, 1) if tot_attr > 0 else 0.0
-
-            if "Couv_HVC (%)" in display_df.columns:
-                tot_attr_hvc = pd.to_numeric(_col(display_df, "HVC_Attrib", 0), errors="coerce").fillna(0).sum()
-                tot_touch_hvc = pd.to_numeric(_col(display_df, "HVC_Wallet", 0), errors="coerce").fillna(0).sum()
-                total["Couv_HVC (%)"] = round(tot_touch_hvc / tot_attr_hvc * 100, 1) if tot_attr_hvc > 0 else 0.0
-
-            if "Couv_Others (%)" in display_df.columns:
-                tot_attr_oth = pd.to_numeric(_col(display_df, "Others_Attrib", 0), errors="coerce").fillna(0).sum()
-                tot_touch_oth = pd.to_numeric(_col(display_df, "Others_Wallet", 0), errors="coerce").fillna(0).sum()
-                total["Couv_Others (%)"] = round(tot_touch_oth / tot_attr_oth * 100, 1) if tot_attr_oth > 0 else 0.0
-
-        # TPW Intraday windows (TPW 6h-9h50, TPW 9h50-13h50, TPW 13h50-17h50)
-        if table is not None:
             for label in WORK_PROGRESS_LABELS:
-                tpw_col = f"TPW {label}"
-                if tpw_col in display_df.columns:
+                wp_col = ("Work Progress", label)
+                if wp_col in display_df.columns:
                     serve_col, tr_col = f"HVC Serve {label}", f"TR_HVC {label}"
                     other_serve_col, other_tr_col = f"Other Serve {label}", f"TR_Other {label}"
                     hvc_s = pd.to_numeric(_col(table, serve_col, 0), errors="coerce").fillna(0)
                     other_s = pd.to_numeric(_col(table, other_serve_col, 0), errors="coerce").fillna(0)
-                    if is_ouvres_mode:
-                        nb_j = pd.Series(float(nb_ouvres), index=table.index, dtype=float)
-                    else:
-                        nb_j = pd.to_numeric(_col(table, "Nb_Jours_Actifs", _col(table, "Nb_Jours", 1)), errors="coerce").replace(0, np.nan).fillna(1)
-
-                    tot_hvc = hvc_s.sum()
-                    tot_other = other_s.sum()
+                    tot_hvc = int(hvc_s.sum())
+                    tot_other = int(other_s.sum())
 
                     tr_hvc_s = pd.to_numeric(_col(table, tr_col, 0), errors="coerce").fillna(0)
                     tr_other_s = pd.to_numeric(_col(table, other_tr_col, 0), errors="coerce").fillna(0)
 
-                    cible_hvc_w = (hvc_s * nb_j * 3).sum()
-                    trans_hvc_w = (tr_hvc_s * hvc_s * nb_j * 3 / 100).sum()
+                    cible_hvc_w = (hvc_s * nb_jours * 3).sum()
+                    trans_hvc_w = (tr_hvc_s * hvc_s * nb_jours * 3 / 100).sum()
                     tr_hvc_tot = round(trans_hvc_w / cible_hvc_w * 100, 1) if cible_hvc_w > 0 else 0.0
 
-                    cible_other_w = (other_s * nb_j * 3).sum()
-                    trans_other_w = (tr_other_s * other_s * nb_j * 3 / 100).sum()
+                    cible_other_w = (other_s * nb_jours * 3).sum()
+                    trans_other_w = (tr_other_s * other_s * nb_jours * 3 / 100).sum()
                     tr_other_tot = round(trans_other_w / cible_other_w * 100, 1) if cible_other_w > 0 else 0.0
 
-                    total[tpw_col] = f"{int(tot_hvc)} | {tr_hvc_tot:.1f}% | {int(tot_other)} | {tr_other_tot:.1f}%"
+                    total_dict[wp_col] = f"{tot_hvc} | {tr_hvc_tot:.1f}% | {tot_other} | {tr_other_tot:.1f}%"
 
-    elif segment in ("pr_caisse", "cds"):
-        if "Taux_Couverture (%)" in total and "POS_Attribues" in total and "POS_Touches" in total:
-            total["Taux_Couverture (%)"] = (
-                round(total["POS_Touches"] / total["POS_Attribues"] * 100, 1)
-                if total["POS_Attribues"] else 0.0
-            )
+        tot_attr = total_dict.get(("Objectifs & Couverture", "Tot_Attrib"), 0)
+        tot_touch = total_dict.get(("Objectifs & Couverture", "POS_Touches"), 0)
+        if ("Objectifs & Couverture", "Couv_Tot_(%)") in display_df.columns:
+            total_dict[("Objectifs & Couverture", "Couv_Tot_(%)")] = round(tot_touch / tot_attr * 100, 1) if tot_attr > 0 else 0.0
 
-    # Moyenne des heures pour la ligne TOTAL
-    for hour_col in ["H_Dotation", "1ere_Trans", "Dern_Trans", "Heure_Dotation", "Premiere_Trans", "Derniere_Trans"]:
-        if hour_col in display_df.columns:
-            valid_mins = display_df[hour_col].apply(_time_str_to_minutes).dropna()
-            if not valid_mins.empty:
-                total[hour_col] = _minutes_to_time(valid_mins.mean())
+        hvc_attr = total_dict.get(("Objectifs & Couverture", "HVC_Attrib"), 0)
+        hvc_served_wallet = total_dict.get(("HVC_Wallet", "Served"), 0)
+        if ("Objectifs & Couverture", "Couv_HVC_(%)") in display_df.columns:
+            total_dict[("Objectifs & Couverture", "Couv_HVC_(%)")] = round(hvc_served_wallet / hvc_attr * 100, 1) if hvc_attr > 0 else 0.0
+
+        oth_attr = total_dict.get(("Objectifs & Couverture", "Others_Attrib"), 0)
+        oth_served_wallet = total_dict.get(("Others_Wallet", "Served"), 0)
+        if ("Objectifs & Couverture", "Couv_Others_(%)") in display_df.columns:
+            total_dict[("Objectifs & Couverture", "Couv_Others_(%)")] = round(oth_served_wallet / oth_attr * 100, 1) if oth_attr > 0 else 0.0
+
+        if ("Objectifs & Couverture", "Persistance_(%)") in display_df.columns:
+            total_dict[("Objectifs & Couverture", "Persistance_(%)")] = None
+
+        total_row_df = pd.DataFrame([total_dict], columns=display_df.columns).astype(display_df.dtypes.to_dict(), errors="ignore")
+        return pd.concat([display_df, total_row_df], ignore_index=True)
+
+    if segment == "pr_caisse":
+        label_col = ("Acteur", "Type")
+        total_dict = {col: ("" if display_df[col].dtype == object else None) for col in display_df.columns}
+        total_dict[label_col] = "TOTAL"
+
+        filters = getattr(context, "filters", None)
+        if filters and filters.start_date and filters.end_date:
+            try:
+                d_start = pd.to_datetime(filters.start_date).date()
+                d_end = pd.to_datetime(filters.end_date).date()
+                nb_jours_total = max((d_end - d_start).days + 1, 1)
+            except Exception:
+                nb_jours_total = 1
+        else:
+            nb_jours_total = 1
+        if ("Temps", "Nb_Jours") in display_df.columns:
+            total_dict[("Temps", "Nb_Jours")] = int(nb_jours_total)
+
+        for col in [
+            ("Dotation & Trésorerie", "Montant"),
+            ("Dotation & Trésorerie", "Float_Up"),
+            ("HVC_Wallet", "Served"),
+            ("HVC_Wallet", "FD"),
+            ("HVC_No_Wallet", "Served"),
+            ("HVC_No_Wallet", "FD"),
+            ("HVC", "Served"),
+            ("HVC", "FD"),
+            ("Others_Wallet", "Served"),
+            ("Others_Wallet", "FD"),
+            ("Others_No_Wallet", "Served"),
+            ("Others_No_Wallet", "FD"),
+            ("Others", "Served"),
+            ("Others", "FD"),
+            ("Synthèse POS & Finances", "Somme_POS_Serve"),
+            ("Synthèse POS & Finances", "Somme_FD"),
+            ("Objectifs & Couverture", "POS_Attribues"),
+            ("Objectifs & Couverture", "POS_Touches"),
+        ]:
+            if col in display_df.columns:
+                total_dict[col] = int(pd.to_numeric(display_df[col], errors="coerce").fillna(0).sum())
+
+        # Couverture strictement restreinte aux Point Relais (et non Caisses)
+        if ("Objectifs & Couverture", "POS_Attribues") in display_df.columns and ("Objectifs & Couverture", "POS_Touches") in display_df.columns:
+            is_pr = display_df[("Acteur", "Type")].astype(str).str.lower().str.contains("point relais")
+            pr_rows = display_df[is_pr]
+            if not pr_rows.empty:
+                pr_attrib = pd.to_numeric(pr_rows[("Objectifs & Couverture", "POS_Attribues")], errors="coerce").fillna(0).sum()
+                pr_touches = pd.to_numeric(pr_rows[("Objectifs & Couverture", "POS_Touches")], errors="coerce").fillna(0).sum()
+                if pr_attrib > 0:
+                    total_dict[("Objectifs & Couverture", "Taux_Couverture_(%)")] = round(pr_touches / pr_attrib * 100, 1)
+                else:
+                    total_dict[("Objectifs & Couverture", "Taux_Couverture_(%)")] = 0.0
             else:
-                total[hour_col] = "N/A"
+                total_dict[("Objectifs & Couverture", "Taux_Couverture_(%)")] = 0.0
 
-    if segment == "cds" and "HVC_Serve" in total and "Nb_HVC_Attribue" in total:
-        total_serve, total_quota = total["HVC_Serve"], total["Nb_HVC_Attribue"]
-        total["Taux_Couverture_Quota"] = f"{(total_serve / total_quota * 100):.1f}%" if total_quota else "N/A"
+        if ("Objectifs & Couverture", "Taux_Persistance_(%)") in display_df.columns:
+            total_dict[("Objectifs & Couverture", "Taux_Persistance_(%)")] = None
 
+        total_row_df = pd.DataFrame([total_dict], columns=display_df.columns).astype(display_df.dtypes.to_dict(), errors="ignore")
+        return pd.concat([display_df, total_row_df], ignore_index=True)
+
+    label_col = display_df.columns[0]
+    total: dict[str, Any] = {col: "" for col in display_df.columns}
+    total[label_col] = "TOTAL"
+    for col in display_df.select_dtypes(include="number").columns:
+        total[col] = display_df[col].sum()
     return pd.concat([display_df, pd.DataFrame([total])], ignore_index=True)
 
 
@@ -890,20 +1011,29 @@ def _total_row_match(row: pd.Series) -> bool:
     return str(row.iloc[0]).strip().upper() == "TOTAL"
 
 
-def _inactive_row_style(serve_col: str):
-    """Ligne rouge clair si l'acteur n'a servi aucun POS (hors ligne TOTAL)."""
-
-    def _style(row: pd.Series) -> dict[str, Any]:
-        if _total_row_match(row):
-            return {}
-        try:
-            if float(row.get(serve_col, 0)) == 0:
-                return {"fill": "#ffcccc"}
-        except Exception:
-            pass
+def _inactive_commercial_style(row: pd.Series) -> dict[str, Any]:
+    if _total_row_match(row):
         return {}
+    try:
+        served = float(row.get(("Synthèse Ventes & POS", "Somme_POS_Serve"), row.get(("Commercial", "Somme_POS_Serve"), 0)))
+        tx = float(row.get(("Temps & Activité", "Nb_Trans"), 0))
+        if served == 0 and tx == 0:
+            return {"fill": "#ffcccc"}
+    except Exception:
+        pass
+    return {}
 
-    return _style
+
+def _inactive_pr_caisse_style(row: pd.Series) -> dict[str, Any]:
+    if _total_row_match(row):
+        return {}
+    try:
+        served = float(row.get(("Synthèse POS & Finances", "Somme_POS_Serve"), row.get(("HVC", "Served"), 0)))
+        if served == 0:
+            return {"fill": "#ffcccc"}
+    except Exception:
+        pass
+    return {}
 
 
 def _time_str_to_minutes(value: Any) -> Optional[int]:
@@ -917,7 +1047,8 @@ def _time_str_to_minutes(value: Any) -> Optional[int]:
 
 
 def _heure_debut_rule(value: Any, row: pd.Series, col: Any) -> Optional[dict[str, Any]]:
-    if col not in ("Heure_Dotation", "Premiere_Trans", "H_Dotation", "1ere_Trans"):
+    col_str = col[-1] if isinstance(col, tuple) else str(col)
+    if col_str not in ("Heure_Dotation", "Premiere_Trans", "H_Dotation", "1ere_Trans", "Heure"):
         return None
     if _total_row_match(row):
         return None
@@ -932,7 +1063,8 @@ def _heure_debut_rule(value: Any, row: pd.Series, col: Any) -> Optional[dict[str
 
 
 def _heure_fin_rule(value: Any, row: pd.Series, col: Any) -> Optional[dict[str, Any]]:
-    if col not in ("Derniere_Trans", "Dern_Trans"):
+    col_str = col[-1] if isinstance(col, tuple) else str(col)
+    if col_str not in ("Derniere_Trans", "Dern_Trans"):
         return None
     if _total_row_match(row):
         return None
@@ -950,37 +1082,54 @@ def _commercial_styles() -> dict[str, Any]:
     return {
         "sheet_name": "Performance Commerciaux",
         "total_row_match": _total_row_match,
+        "row_styles": _inactive_commercial_style,
         "formats": {
-            "Dotation": "#,##0",
-            "Dotation_Montant": "#,##0",
-            "FU": "#,##0",
-            "FU (Float Up)": "#,##0",
-            "FD_HVC": "#,##0",
-            "HVC_Wallet": "#,##0",
-            "HVC_No_Wallet": "#,##0",
-            "Σ_HVC_Serve": "#,##0",
-            "FD_Others": "#,##0",
-            "Others_Wallet": "#,##0",
-            "Others_No_Wallet": "#,##0",
-            "Σ_Others_Serve": "#,##0",
-            "Σ_FD": "#,##0",
-            "Σ_POS_Serve": "#,##0",
-            "HVC_Attrib": "#,##0",
-            "Others_Attrib": "#,##0",
-            "Tot_Attrib": "#,##0",
-            "POS_Touches": "#,##0",
-            "POS_Attribues": "#,##0",
-            "Nb_Trans": "#,##0",
-            "Nb_Jours": "#,##0",
+            ("Dotation & Trésorerie", "Montant"): "#,##0",
+            ("Dotation & Trésorerie", "FU"): "#,##0",
+            ("Temps & Activité", "Nb_Jours"): "#,##0",
+            ("Temps & Activité", "Nb_Trans"): "#,##0",
+            ("HVC_Wallet", "Served"): "#,##0",
+            ("HVC_Wallet", "FD"): "#,##0",
+            ("HVC_Wallet", "TR_(%)"): '0.0"%"',
+            ("HVC_No_Wallet", "Served"): "#,##0",
+            ("HVC_No_Wallet", "FD"): "#,##0",
+            ("HVC_No_Wallet", "TR_(%)"): '0.0"%"',
+            ("HVC", "Served"): "#,##0",
+            ("HVC", "FD"): "#,##0",
+            ("HVC", "TR_(%)"): '0.0"%"',
+            ("Others_Wallet", "Served"): "#,##0",
+            ("Others_Wallet", "FD"): "#,##0",
+            ("Others_Wallet", "TR_(%)"): '0.0"%"',
+            ("Others_No_Wallet", "Served"): "#,##0",
+            ("Others_No_Wallet", "FD"): "#,##0",
+            ("Others_No_Wallet", "TR_(%)"): '0.0"%"',
+            ("Others", "Served"): "#,##0",
+            ("Others", "FD"): "#,##0",
+            ("Others", "TR_(%)"): '0.0"%"',
+            ("Synthèse Ventes & POS", "Somme_POS_Serve"): "#,##0",
+            ("Synthèse Ventes & POS", "Somme_FD"): "#,##0",
+            ("Synthèse Ventes & POS", "TR_General_(%)"): '0.0"%"',
+            ("Synthèse Wallet", "Total_Served"): "#,##0",
+            ("Synthèse Wallet", "Total_FD"): "#,##0",
+            ("Synthèse No_Wallet", "Total_Served"): "#,##0",
+            ("Synthèse No_Wallet", "Total_FD"): "#,##0",
+            ("Objectifs & Couverture", "HVC_Attrib"): "#,##0",
+            ("Objectifs & Couverture", "Others_Attrib"): "#,##0",
+            ("Objectifs & Couverture", "Tot_Attrib"): "#,##0",
+            ("Objectifs & Couverture", "POS_Touches"): "#,##0",
+            ("Objectifs & Couverture", "Couv_HVC_(%)"): '0.0"%"',
+            ("Objectifs & Couverture", "Couv_Others_(%)"): '0.0"%"',
+            ("Objectifs & Couverture", "Couv_Tot_(%)"): '0.0"%"',
+            ("Objectifs & Couverture", "Persistance_(%)"): '0.0"%"',
         },
         "rules": [
             _heure_debut_rule,
             _heure_fin_rule,
             {
                 "columns": [
-                    "TR_HVC_Wallet (%)", "TR_HVC_No_Wallet (%)", "TR_HVC_General (%)",
-                    "TR_Others_Wallet (%)", "TR_Others_No_Wallet (%)", "TR_Others_General (%)",
-                    "TR_General (%)", "TR_HVC (%)", "TR_Other (%)",
+                    ("HVC_Wallet", "TR_(%)"), ("HVC_No_Wallet", "TR_(%)"), ("HVC", "TR_(%)"),
+                    ("Others_Wallet", "TR_(%)"), ("Others_No_Wallet", "TR_(%)"), ("Others", "TR_(%)"),
+                    ("Synthèse Ventes & POS", "TR_General_(%)"),
                 ],
                 "op": "<",
                 "value": 70,
@@ -988,9 +1137,9 @@ def _commercial_styles() -> dict[str, Any]:
             },
             {
                 "columns": [
-                    "TR_HVC_Wallet (%)", "TR_HVC_No_Wallet (%)", "TR_HVC_General (%)",
-                    "TR_Others_Wallet (%)", "TR_Others_No_Wallet (%)", "TR_Others_General (%)",
-                    "TR_General (%)", "TR_HVC (%)", "TR_Other (%)",
+                    ("HVC_Wallet", "TR_(%)"), ("HVC_No_Wallet", "TR_(%)"), ("HVC", "TR_(%)"),
+                    ("Others_Wallet", "TR_(%)"), ("Others_No_Wallet", "TR_(%)"), ("Others", "TR_(%)"),
+                    ("Synthèse Ventes & POS", "TR_General_(%)"),
                 ],
                 "op": "between",
                 "value": (70, 99.999),
@@ -998,21 +1147,22 @@ def _commercial_styles() -> dict[str, Any]:
             },
             {
                 "columns": [
-                    "TR_HVC_Wallet (%)", "TR_HVC_No_Wallet (%)", "TR_HVC_General (%)",
-                    "TR_Others_Wallet (%)", "TR_Others_No_Wallet (%)", "TR_Others_General (%)",
-                    "TR_General (%)", "TR_HVC (%)", "TR_Other (%)",
+                    ("HVC_Wallet", "TR_(%)"), ("HVC_No_Wallet", "TR_(%)"), ("HVC", "TR_(%)"),
+                    ("Others_Wallet", "TR_(%)"), ("Others_No_Wallet", "TR_(%)"), ("Others", "TR_(%)"),
+                    ("Synthèse Ventes & POS", "TR_General_(%)"),
                 ],
                 "op": ">=",
                 "value": 100,
                 "style": {"fill": "#d8f3dc"},
             },
-            {"columns": ["Σ_POS_Serve"], "op": "<", "value": 20, "style": {"fill": "#ffd6d6"}},
-            {"columns": ["Σ_POS_Serve"], "op": "between", "value": (20, 39), "style": {"fill": "#fff3bf"}},
-            {"columns": ["Σ_POS_Serve"], "op": ">=", "value": 40, "style": {"fill": "#d8f3dc"}},
+            {"columns": [("Synthèse Ventes & POS", "Somme_POS_Serve")], "op": "<", "value": 20, "style": {"fill": "#ffd6d6"}},
+            {"columns": [("Synthèse Ventes & POS", "Somme_POS_Serve")], "op": "between", "value": (20, 39), "style": {"fill": "#fff3bf"}},
+            {"columns": [("Synthèse Ventes & POS", "Somme_POS_Serve")], "op": ">=", "value": 40, "style": {"fill": "#d8f3dc"}},
             {
                 "columns": [
-                    "Couv_Tot (%)", "Couv_HVC (%)", "Couv_Others (%)",
-                    "Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)",
+                    ("Objectifs & Couverture", "Couv_HVC_(%)"),
+                    ("Objectifs & Couverture", "Couv_Others_(%)"),
+                    ("Objectifs & Couverture", "Couv_Tot_(%)"),
                 ],
                 "op": "<",
                 "value": 70,
@@ -1020,8 +1170,9 @@ def _commercial_styles() -> dict[str, Any]:
             },
             {
                 "columns": [
-                    "Couv_Tot (%)", "Couv_HVC (%)", "Couv_Others (%)",
-                    "Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)",
+                    ("Objectifs & Couverture", "Couv_HVC_(%)"),
+                    ("Objectifs & Couverture", "Couv_Others_(%)"),
+                    ("Objectifs & Couverture", "Couv_Tot_(%)"),
                 ],
                 "op": "between",
                 "value": (70, 89.999),
@@ -1029,8 +1180,9 @@ def _commercial_styles() -> dict[str, Any]:
             },
             {
                 "columns": [
-                    "Couv_Tot (%)", "Couv_HVC (%)", "Couv_Others (%)",
-                    "Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)",
+                    ("Objectifs & Couverture", "Couv_HVC_(%)"),
+                    ("Objectifs & Couverture", "Couv_Others_(%)"),
+                    ("Objectifs & Couverture", "Couv_Tot_(%)"),
                 ],
                 "op": ">=",
                 "value": 90,
@@ -1044,32 +1196,515 @@ def _pr_caisse_styles() -> dict[str, Any]:
     return {
         "sheet_name": "Performance PR & Caisses",
         "total_row_match": _total_row_match,
-        "row_styles": _inactive_row_style("Σ_POS_Serve"),
+        "row_styles": _inactive_pr_caisse_style,
         "formats": {
-            "FD_HVC": "#,##0",
-            "FD_Others": "#,##0",
-            "Σ_FD": "#,##0",
-            "Dotation_Montant": "#,##0",
-            "FU (Float Up)": "#,##0",
-            "POS_Attribues": "#,##0",
-            "POS_Touches": "#,##0",
+            ("Temps", "Nb_Jours"): "#,##0",
+            ("Dotation & Trésorerie", "Montant"): "#,##0",
+            ("Dotation & Trésorerie", "Float_Up"): "#,##0",
+            ("HVC_Wallet", "Served"): "#,##0",
+            ("HVC_Wallet", "FD"): "#,##0",
+            ("HVC_No_Wallet", "Served"): "#,##0",
+            ("HVC_No_Wallet", "FD"): "#,##0",
+            ("HVC", "Served"): "#,##0",
+            ("HVC", "FD"): "#,##0",
+            ("Others_Wallet", "Served"): "#,##0",
+            ("Others_Wallet", "FD"): "#,##0",
+            ("Others_No_Wallet", "Served"): "#,##0",
+            ("Others_No_Wallet", "FD"): "#,##0",
+            ("Others", "Served"): "#,##0",
+            ("Others", "FD"): "#,##0",
+            ("Synthèse POS & Finances", "Somme_POS_Serve"): "#,##0",
+            ("Synthèse POS & Finances", "Somme_FD"): "#,##0",
+            ("Synthèse Wallet", "Total_Served"): "#,##0",
+            ("Synthèse Wallet", "Total_FD"): "#,##0",
+            ("Synthèse No_Wallet", "Total_Served"): "#,##0",
+            ("Synthèse No_Wallet", "Total_FD"): "#,##0",
+            ("Objectifs & Couverture", "POS_Attribues"): "#,##0",
+            ("Objectifs & Couverture", "POS_Touches"): "#,##0",
+            ("Objectifs & Couverture", "Taux_Couverture_(%)"): '0.0"%"',
+            ("Objectifs & Couverture", "Taux_Persistance_(%)"): '0.0"%"',
         },
     }
 
 
 def _cds_styles() -> dict[str, Any]:
+    def _inactive_cds(row: pd.Series) -> dict[str, Any]:
+        if str(row.iloc[0]).strip().upper() == "TOTAL":
+            return {}
+        try:
+            served = float(row.get(("Synthèse POS", "Somme_POS_Serve"), row.get(("HVC_Wallet", "Served"), 0)))
+            ccial_served = float(row.get(("Commerciaux", "Served"), 0))
+            if served == 0 and ccial_served == 0:
+                return {"fill": "#ffcccc"}
+        except Exception:
+            pass
+        return {}
+
     return {
         "sheet_name": "Performance CDS",
-        "total_row_match": _total_row_match,
-        "row_styles": _inactive_row_style("HVC_Serve"),
+        "total_row_match": lambda row: str(row.iloc[0]).strip().upper() == "TOTAL",
+        "row_styles": _inactive_cds,
         "formats": {
-            "FD_HVC": "#,##0",
-            "FD_Hors_Portefeuille_HVC": "#,##0",
-            "Σ_FD": "#,##0",
-            "Dotation_Montant": "#,##0",
-            "FU (Float Up)": "#,##0",
+            ("HVC_Wallet", "FD"): "#,##0",
+            ("HVC_No_Wallet", "FD"): "#,##0",
+            ("Others", "FD"): "#,##0",
+            ("Commerciaux", "FD"): "#,##0",
+            ("Finances", "Somme_FD"): "#,##0",
+            ("Dotation", "Montant"): "#,##0",
+            ("Objectifs & Suivi", "Taux_Couverture_(%)"): '0.0"%"',
+        },
+        "display_formats": {
+            ("HVC_Wallet", "FD"): lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) and v != "" else "-",
+            ("HVC_No_Wallet", "FD"): lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) and v != "" else "-",
+            ("Others", "FD"): lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) and v != "" else "-",
+            ("Commerciaux", "FD"): lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) and v != "" else "-",
+            ("Finances", "Somme_FD"): lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) and v != "" else "-",
+            ("Dotation", "Montant"): lambda v: f"{int(v):,}".replace(",", " ") if pd.notna(v) and v != "" else "-",
+            ("Objectifs & Suivi", "Taux_Couverture_(%)"): lambda v: f"{float(v):.1f}%" if pd.notna(v) and v != "" and v != "N/A" else "N/A",
         },
     }
+
+
+def _style_cds_display(df: pd.DataFrame):
+    """Formatage riche et stylisation du tableau MultiIndex CDS pour Streamlit."""
+    if df.empty:
+        return df
+
+    fmt = {
+        ("HVC_Wallet", "FD"): "{:,.0f}",
+        ("HVC_No_Wallet", "FD"): "{:,.0f}",
+        ("Others", "FD"): "{:,.0f}",
+        ("Commerciaux", "FD"): "{:,.0f}",
+        ("Finances", "Somme_FD"): "{:,.0f}",
+        ("Dotation", "Montant"): "{:,.0f}",
+        ("Objectifs & Suivi", "Taux_Couverture_(%)"): lambda v: f"{float(v):.1f}%" if pd.notna(v) and v != "" and v != "N/A" else "N/A",
+    }
+
+    def highlight_inactive(row):
+        if str(row.get(("CDS", "Nom"), "")).strip().upper() == "TOTAL":
+            return [""] * len(row)
+        try:
+            pos_served = float(row.get(("Synthèse POS", "Somme_POS_Serve"), 0))
+            ccial_served = float(row.get(("Commerciaux", "Served"), 0))
+            if pos_served == 0 and ccial_served == 0:
+                return ["background-color: #ffd6d6"] * len(row)
+        except Exception:
+            pass
+        return [""] * len(row)
+
+    return df.style.format(fmt).apply(highlight_inactive, axis=1)
+
+
+def _style_commercial_display(df: pd.DataFrame):
+    """Formatage riche et stylisation du tableau MultiIndex Commercial pour Streamlit."""
+    if df.empty:
+        return df
+
+    int_cols = [
+        ("Dotation & Trésorerie", "Montant"),
+        ("Dotation & Trésorerie", "FU"),
+        ("Temps & Activité", "Nb_Jours"),
+        ("Temps & Activité", "Nb_Trans"),
+        ("HVC_Wallet", "Served"),
+        ("HVC_Wallet", "FD"),
+        ("HVC_No_Wallet", "Served"),
+        ("HVC_No_Wallet", "FD"),
+        ("HVC", "Served"),
+        ("HVC", "FD"),
+        ("Others_Wallet", "Served"),
+        ("Others_Wallet", "FD"),
+        ("Others_No_Wallet", "Served"),
+        ("Others_No_Wallet", "FD"),
+        ("Others", "Served"),
+        ("Others", "FD"),
+        ("Synthèse Ventes & POS", "Somme_POS_Serve"),
+        ("Synthèse Ventes & POS", "Somme_FD"),
+        ("Synthèse Wallet", "Total_Served"),
+        ("Synthèse Wallet", "Total_FD"),
+        ("Synthèse No_Wallet", "Total_Served"),
+        ("Synthèse No_Wallet", "Total_FD"),
+        ("Objectifs & Couverture", "HVC_Attrib"),
+        ("Objectifs & Couverture", "Others_Attrib"),
+        ("Objectifs & Couverture", "Tot_Attrib"),
+        ("Objectifs & Couverture", "POS_Touches"),
+    ]
+    pct_cols = [
+        ("HVC_Wallet", "TR_(%)"),
+        ("HVC_No_Wallet", "TR_(%)"),
+        ("HVC", "TR_(%)"),
+        ("Others_Wallet", "TR_(%)"),
+        ("Others_No_Wallet", "TR_(%)"),
+        ("Others", "TR_(%)"),
+        ("Synthèse Ventes & POS", "TR_General_(%)"),
+        ("Objectifs & Couverture", "Couv_HVC_(%)"),
+        ("Objectifs & Couverture", "Couv_Others_(%)"),
+        ("Objectifs & Couverture", "Couv_Tot_(%)"),
+        ("Objectifs & Couverture", "Persistance_(%)"),
+    ]
+
+    fmt = {}
+    for c in int_cols:
+        if c in df.columns:
+            fmt[c] = "{:,.0f}"
+    for c in pct_cols:
+        if c in df.columns:
+            fmt[c] = lambda v: f"{float(v):.1f}%" if pd.notna(v) and v != "" and v != "N/A" else "-"
+
+    def highlight_inactive(row):
+        if str(row.iloc[0]).strip().upper() == "TOTAL":
+            return [""] * len(row)
+        try:
+            served = float(row.get(("Synthèse Ventes & POS", "Somme_POS_Serve"), 0))
+            trans = float(row.get(("Temps & Activité", "Nb_Trans"), 0))
+            if served == 0 and trans == 0:
+                return ["background-color: #ffd6d6"] * len(row)
+        except Exception:
+            pass
+        return [""] * len(row)
+
+    styled = df.style.format(fmt).apply(highlight_inactive, axis=1)
+    pers_col = ("Objectifs & Couverture", "Persistance_(%)")
+    if pers_col in df.columns:
+        def color_pers(val):
+            if pd.isna(val) or val == "" or val == "N/A":
+                return ""
+            try:
+                v = float(val)
+                if v >= 70:
+                    return "background-color: #d8f3dc; color: #1b4332;"
+                if v >= 40:
+                    return "background-color: #fff3bf; color: #5f4700;"
+                return "background-color: #ffd6d6; color: #7f1d1d;"
+            except Exception:
+                return ""
+        if hasattr(styled, "map"):
+            styled = styled.map(color_pers, subset=[pers_col])
+        else:
+            styled = styled.applymap(color_pers, subset=[pers_col])
+    return styled
+
+
+def _style_pr_caisse_display(df: pd.DataFrame):
+    """Formatage riche et stylisation du tableau MultiIndex PR & Caisses pour Streamlit."""
+    if df.empty:
+        return df
+
+    int_cols = [
+        ("Temps", "Nb_Jours"),
+        ("Dotation & Trésorerie", "Montant"),
+        ("Dotation & Trésorerie", "Float_Up"),
+        ("HVC_Wallet", "Served"),
+        ("HVC_Wallet", "FD"),
+        ("HVC_No_Wallet", "Served"),
+        ("HVC_No_Wallet", "FD"),
+        ("HVC", "Served"),
+        ("HVC", "FD"),
+        ("Others_Wallet", "Served"),
+        ("Others_Wallet", "FD"),
+        ("Others_No_Wallet", "Served"),
+        ("Others_No_Wallet", "FD"),
+        ("Others", "Served"),
+        ("Others", "FD"),
+        ("Synthèse POS & Finances", "Somme_POS_Serve"),
+        ("Synthèse POS & Finances", "Somme_FD"),
+        ("Synthèse Wallet", "Total_Served"),
+        ("Synthèse Wallet", "Total_FD"),
+        ("Synthèse No_Wallet", "Total_Served"),
+        ("Synthèse No_Wallet", "Total_FD"),
+        ("Objectifs & Couverture", "POS_Attribues"),
+        ("Objectifs & Couverture", "POS_Touches"),
+    ]
+    pct_cols = [
+        ("Objectifs & Couverture", "Taux_Couverture_(%)"),
+        ("Objectifs & Couverture", "Taux_Persistance_(%)"),
+    ]
+
+    fmt = {}
+    for c in int_cols:
+        if c in df.columns:
+            fmt[c] = "{:,.0f}"
+    for c in pct_cols:
+        if c in df.columns:
+            fmt[c] = lambda v: f"{float(v):.1f}%" if pd.notna(v) and v != "" and v != "N/A" else "-"
+
+    def highlight_inactive(row):
+        if str(row.iloc[0]).strip().upper() == "TOTAL":
+            return [""] * len(row)
+        try:
+            served = float(row.get(("Synthèse POS & Finances", "Somme_POS_Serve"), 0))
+            if served == 0:
+                return ["background-color: #ffd6d6"] * len(row)
+        except Exception:
+            pass
+        return [""] * len(row)
+
+    styled = df.style.format(fmt).apply(highlight_inactive, axis=1)
+    pers_col = ("Objectifs & Couverture", "Taux_Persistance_(%)")
+    if pers_col in df.columns:
+        def color_pers(val):
+            if pd.isna(val) or val == "" or val == "N/A":
+                return ""
+            try:
+                v = float(val)
+                if v >= 70:
+                    return "background-color: #d8f3dc; color: #1b4332;"
+                if v >= 40:
+                    return "background-color: #fff3bf; color: #5f4700;"
+                return "background-color: #ffd6d6; color: #7f1d1d;"
+            except Exception:
+                return ""
+        if hasattr(styled, "map"):
+            styled = styled.map(color_pers, subset=[pers_col])
+        else:
+            styled = styled.applymap(color_pers, subset=[pers_col])
+    return styled
+
+
+def _render_performance_insights(context: PerformanceContext, display_df: pd.DataFrame) -> None:
+    """Espace d'analyse automatisée et synthèse terrain sous chaque tableau de bord."""
+    if display_df.empty:
+        return
+
+    segment = context.segment
+    with st.expander("📝 Synthèse analytique & Insights terrain", expanded=True):
+        if segment == "cds":
+            _render_cds_insights(display_df, context)
+        elif segment == "commercial":
+            _render_commercial_insights(display_df, context)
+        elif segment == "pr_caisse":
+            _render_pr_caisse_insights(display_df, context)
+
+
+def _render_cds_insights(display_df: pd.DataFrame, context: PerformanceContext) -> None:
+    df = display_df[display_df[("CDS", "Nom")].astype(str).str.upper() != "TOTAL"]
+    if df.empty:
+        st.info("Aucun CDS à analyser.")
+        return
+
+    total_cds = len(df)
+    active_mask = (
+        (pd.to_numeric(df[("Synthèse POS", "Somme_POS_Serve")], errors="coerce").fillna(0) > 0)
+        | (pd.to_numeric(df[("Commerciaux", "Served")], errors="coerce").fillna(0) > 0)
+        | (pd.to_numeric(df[("Finances", "Somme_FD")], errors="coerce").fillna(0) > 0)
+    )
+    nb_active = int(active_mask.sum())
+    nb_inactive = total_cds - nb_active
+    pct_active = (nb_active / total_cds * 100) if total_cds > 0 else 0.0
+
+    tot_hvc_w_served = int(pd.to_numeric(df[("HVC_Wallet", "Served")], errors="coerce").fillna(0).sum())
+    tot_hvc_quota = int(pd.to_numeric(df[("Objectifs & Suivi", "Nb_HVC_Attribue")], errors="coerce").fillna(0).sum())
+    global_cov = (tot_hvc_w_served / tot_hvc_quota * 100) if tot_hvc_quota > 0 else 0.0
+
+    with_quota = df[pd.to_numeric(df[("Objectifs & Suivi", "Nb_HVC_Attribue")], errors="coerce").fillna(0) > 0]
+    best_text = ""
+    if not with_quota.empty:
+        best_row = with_quota.sort_values(
+            [("Objectifs & Suivi", "Taux_Couverture_(%)"), ("HVC_Wallet", "Served")],
+            ascending=False,
+        ).iloc[0]
+        best_nom = best_row[("CDS", "Nom")]
+        best_taux = float(best_row[("Objectifs & Suivi", "Taux_Couverture_(%)")])
+        best_served = int(best_row[("HVC_Wallet", "Served")])
+        best_quota = int(best_row[("Objectifs & Suivi", "Nb_HVC_Attribue")])
+        best_text = f"  - 🌟 **Meilleur performeur** : **{best_nom}** avec **{best_taux:.1f}%** de couverture ({best_served}/{best_quota} HVC servis)."
+
+    tot_fd = int(pd.to_numeric(df[("Finances", "Somme_FD")], errors="coerce").fillna(0).sum())
+    fd_w = int(pd.to_numeric(df[("HVC_Wallet", "FD")], errors="coerce").fillna(0).sum())
+    fd_nw = int(pd.to_numeric(df[("HVC_No_Wallet", "FD")], errors="coerce").fillna(0).sum())
+    fd_oth = int(pd.to_numeric(df[("Others", "FD")], errors="coerce").fillna(0).sum())
+    fd_ccial = int(pd.to_numeric(df[("Commerciaux", "FD")], errors="coerce").fillna(0).sum())
+
+    pct_w = (fd_w / tot_fd * 100) if tot_fd > 0 else 0.0
+    pct_nw = (fd_nw / tot_fd * 100) if tot_fd > 0 else 0.0
+    pct_oth = (fd_oth / tot_fd * 100) if tot_fd > 0 else 0.0
+    pct_ccial = (fd_ccial / tot_fd * 100) if tot_fd > 0 else 0.0
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("##### 👥 Activité & Efficacité de Couverture")
+        st.markdown(
+            f"• **Activité globale** : **{nb_active}/{total_cds} CDS actifs** ({pct_active:.1f}%) sur la période ({nb_inactive} inactif(s)).\n\n"
+            f"• **Efficacité portefeuille HVC_Wallet** : Niveau global d'atteinte de **{global_cov:.1f}%** ({tot_hvc_w_served:,} servis sur {tot_hvc_quota:,} attribués).\n"
+            + best_text
+        )
+    with col2:
+        st.markdown("##### 💰 Ventilation Financière (FD Distribué)")
+        st.markdown(
+            f"• **Montant global distribué** : **{tot_fd:,.0f} FCFA** :\n"
+            f"  - 🟢 **HVC_Wallet (Portefeuille prioritaire)** : {fd_w:,.0f} FCFA ({pct_w:.1f}%)\n"
+            f"  - 🔵 **HVC_No_Wallet (Hors portefeuille)** : {fd_nw:,.0f} FCFA ({pct_nw:.1f}%)\n"
+            f"  - ⚪ **Others (Points hors HVC)** : {fd_oth:,.0f} FCFA ({pct_oth:.1f}%)\n"
+            f"  - 🔄 **Commerciaux (Réapprovisionnement)** : {fd_ccial:,.0f} FCFA ({pct_ccial:.1f}%)"
+        )
+
+    st.markdown("##### ⚠️ Alertes Terrain & Anomalies")
+    dot_no_act = df[
+        (pd.to_numeric(df[("Dotation", "Montant")], errors="coerce").fillna(0) > 0)
+        & (pd.to_numeric(df[("Synthèse POS", "Somme_POS_Serve")], errors="coerce").fillna(0) == 0)
+        & (pd.to_numeric(df[("Commerciaux", "Served")], errors="coerce").fillna(0) == 0)
+    ]
+    exclusive_hp = df[
+        (pd.to_numeric(df[("HVC_Wallet", "Served")], errors="coerce").fillna(0) == 0)
+        & (
+            (pd.to_numeric(df[("HVC_No_Wallet", "Served")], errors="coerce").fillna(0) > 0)
+            | (pd.to_numeric(df[("Others", "Served")], errors="coerce").fillna(0) > 0)
+        )
+    ]
+    zero_cov = df[
+        (pd.to_numeric(df[("Objectifs & Suivi", "Nb_HVC_Attribue")], errors="coerce").fillna(0) > 0)
+        & (pd.to_numeric(df[("Objectifs & Suivi", "Taux_Couverture_(%)")], errors="coerce").fillna(0) == 0.0)
+    ]
+
+    alerts = []
+    if not dot_no_act.empty:
+        noms_dot = ", ".join([f"**{r[('CDS', 'Nom')]}** ({int(r[('Dotation', 'Montant')]):,} FCFA)" for _, r in dot_no_act.iterrows()])
+        alerts.append(f"🚨 **Dotation sans activité** : {noms_dot} ont reçu une dotation sans enregistrer d'activité de distribution.")
+    if not exclusive_hp.empty:
+        noms_hp = ", ".join([f"**{nom}**" for nom in exclusive_hp[("CDS", "Nom")].tolist()])
+        alerts.append(f"⚠️ **Distribution hors-portefeuille exclusive** : {noms_hp} n'ont servi aucun client de leur portefeuille HVC mais opèrent hors-portefeuille.")
+    if not zero_cov.empty:
+        noms_zero = ", ".join([f"**{nom}**" for nom in zero_cov[("CDS", "Nom")].tolist()])
+        alerts.append(f"ℹ️ **Couverture nulle** : {noms_zero} enregistrent 0.0% de couverture malgré un portefeuille HVC attribué.")
+
+    if alerts:
+        for alert in alerts:
+            st.warning(alert)
+    else:
+        st.success("✅ Aucun signalement critique détecté : alignement opérationnel et portefeuille conforme.")
+
+
+def _render_commercial_insights(display_df: pd.DataFrame, context: PerformanceContext) -> None:
+    df = display_df[~display_df.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+    if df.empty:
+        st.info("Aucun commercial à analyser.")
+        return
+
+    total_comm = len(df)
+    active_mask = (
+        (pd.to_numeric(df.get(("Temps & Activité", "Nb_Trans"), 0), errors="coerce").fillna(0) > 0)
+        | (pd.to_numeric(df.get(("Synthèse Ventes & POS", "Somme_POS_Serve"), 0), errors="coerce").fillna(0) > 0)
+    )
+    nb_active = int(active_mask.sum())
+    nb_inactive = total_comm - nb_active
+    pct_active = (nb_active / total_comm * 100) if total_comm > 0 else 0.0
+
+    tot_attrib = int(pd.to_numeric(df.get(("Objectifs & Couverture", "Tot_Attrib"), 0), errors="coerce").fillna(0).sum())
+    tot_touch = int(pd.to_numeric(df.get(("Objectifs & Couverture", "POS_Touches"), 0), errors="coerce").fillna(0).sum())
+    global_cov = (tot_touch / tot_attrib * 100) if tot_attrib > 0 else 0.0
+
+    best_text = ""
+    with_quota = df[pd.to_numeric(df.get(("Objectifs & Couverture", "Tot_Attrib"), 0), errors="coerce").fillna(0) > 0]
+    if not with_quota.empty:
+        best_row = with_quota.sort_values(
+            [("Objectifs & Couverture", "Couv_Tot_(%)"), ("Objectifs & Couverture", "POS_Touches")], ascending=False
+        ).iloc[0]
+        best_nom = best_row.get(("Commercial", "Nom"), "")
+        best_taux = float(best_row.get(("Objectifs & Couverture", "Couv_Tot_(%)"), 0))
+        best_touch = int(best_row.get(("Objectifs & Couverture", "POS_Touches"), 0))
+        best_attr = int(best_row.get(("Objectifs & Couverture", "Tot_Attrib"), 0))
+        best_text = f"  - 🌟 **Meilleur performeur** : **{best_nom}** avec **{best_taux:.1f}%** de couverture ({best_touch}/{best_attr} POS servis)."
+
+    tot_fd = int(pd.to_numeric(df.get(("Synthèse Ventes & POS", "Somme_FD"), 0), errors="coerce").fillna(0).sum())
+    fd_w = int(
+        pd.to_numeric(df.get(("HVC_Wallet", "FD"), 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(df.get(("Others_Wallet", "FD"), 0), errors="coerce").fillna(0).sum()
+    )
+    fd_nw = int(
+        pd.to_numeric(df.get(("HVC_No_Wallet", "FD"), 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(df.get(("Others_No_Wallet", "FD"), 0), errors="coerce").fillna(0).sum()
+    )
+    pct_w = (fd_w / tot_fd * 100) if tot_fd > 0 else 0.0
+    pct_nw = (fd_nw / tot_fd * 100) if tot_fd > 0 else 0.0
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("##### 👥 Activité & Couverture Commerciaux")
+        st.markdown(
+            f"• **Activité globale** : **{nb_active}/{total_comm} commerciaux actifs** ({pct_active:.1f}%) sur la période ({nb_inactive} inactif(s)).\n\n"
+            f"• **Couverture portefeuille globale** : **{global_cov:.1f}%** ({tot_touch:,} touchés sur {tot_attrib:,} attribués).\n"
+            + best_text
+        )
+    with col2:
+        st.markdown("##### 💰 Ventilation Portefeuille vs Hors Portefeuille")
+        st.markdown(
+            f"• **Volume total distribué** : **{tot_fd:,.0f} FCFA** :\n"
+            f"  - 🟢 **Portefeuille (Wallet)** : {fd_w:,.0f} FCFA ({pct_w:.1f}%)\n"
+            f"  - 🔵 **Hors Portefeuille (No Wallet / Conquête)** : {fd_nw:,.0f} FCFA ({pct_nw:.1f}%)"
+        )
+
+    st.markdown("##### ⚠️ Alertes Terrain & Anomalies")
+    dot_no_tx = df[
+        (pd.to_numeric(df.get(("Dotation & Trésorerie", "Montant"), 0), errors="coerce").fillna(0) > 0)
+        & (pd.to_numeric(df.get(("Temps & Activité", "Nb_Trans"), 0), errors="coerce").fillna(0) == 0)
+    ]
+    alerts = []
+    if not dot_no_tx.empty:
+        noms_dot = ", ".join([f"**{r.get(('Commercial', 'Nom'), '')}** ({int(r.get(('Dotation & Trésorerie', 'Montant'), 0)):,} FCFA)" for _, r in dot_no_tx.iterrows()])
+        alerts.append(f"🚨 **Dotation sans transaction** : {noms_dot} ont reçu une dotation sans enregistrer de transaction.")
+
+    if alerts:
+        for alert in alerts:
+            st.warning(alert)
+    else:
+        st.success("✅ Aucun signalement critique détecté : activité conforme.")
+
+
+def _render_pr_caisse_insights(display_df: pd.DataFrame, context: PerformanceContext) -> None:
+    df = display_df[~display_df.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+    if df.empty:
+        st.info("Aucun point relais / caisse à analyser.")
+        return
+
+    total_pts = len(df)
+    active_mask = (
+        (pd.to_numeric(df.get(("Synthèse POS & Finances", "Somme_POS_Serve"), 0), errors="coerce").fillna(0) > 0)
+        | (pd.to_numeric(df.get(("Synthèse POS & Finances", "Somme_FD"), 0), errors="coerce").fillna(0) > 0)
+    )
+    nb_active = int(active_mask.sum())
+    nb_inactive = total_pts - nb_active
+    pct_active = (nb_active / total_pts * 100) if total_pts > 0 else 0.0
+
+    tot_fd = int(pd.to_numeric(df.get(("Synthèse POS & Finances", "Somme_FD"), 0), errors="coerce").fillna(0).sum())
+    fd_hvc = int(pd.to_numeric(df.get(("HVC", "FD"), 0), errors="coerce").fillna(0).sum())
+    fd_oth = int(pd.to_numeric(df.get(("Others", "FD"), 0), errors="coerce").fillna(0).sum())
+    fd_hp = int(
+        pd.to_numeric(df.get(("HVC_No_Wallet", "FD"), 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(df.get(("Others_No_Wallet", "FD"), 0), errors="coerce").fillna(0).sum()
+    )
+
+    is_pr = df[("Acteur", "Type")].astype(str).str.lower().str.contains("point relais") if ("Acteur", "Type") in df.columns else pd.Series(False, index=df.index)
+    pr_df = df[is_pr]
+    pr_cov_text = ""
+    if not pr_df.empty and ("Objectifs & Couverture", "POS_Attribues") in pr_df.columns:
+        tot_attr_pr = int(pd.to_numeric(pr_df[("Objectifs & Couverture", "POS_Attribues")], errors="coerce").fillna(0).sum())
+        tot_touch_pr = int(pd.to_numeric(pr_df[("Objectifs & Couverture", "POS_Touches")], errors="coerce").fillna(0).sum())
+        pr_cov = (tot_touch_pr / tot_attr_pr * 100) if tot_attr_pr > 0 else 0.0
+        pr_cov_text = f"\n\n• **Couverture Portefeuille Point Relais** : **{pr_cov:.1f}%** ({tot_touch_pr:,} touchés sur {tot_attr_pr:,} attribués)."
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("##### 👥 Activité Réseau Points Relais & Caisses")
+        st.markdown(
+            f"• **Activité globale** : **{nb_active}/{total_pts} acteurs actifs** ({pct_active:.1f}%) sur la période ({nb_inactive} inactif(s))."
+            + pr_cov_text
+        )
+    with col2:
+        st.markdown("##### 💰 Ventilation Financière")
+        st.markdown(
+            f"• **Volume total distribué** : **{tot_fd:,.0f} FCFA** :\n"
+            f"  - 🟢 **Segment HVC** : {fd_hvc:,.0f} FCFA\n"
+            f"  - ⚪ **Segment Others (MVC/LVC)** : {fd_oth:,.0f} FCFA\n"
+            f"  - 🔵 **Hors Portefeuille** : {fd_hp:,.0f} FCFA"
+        )
+
+    dot_no_act = df[
+        (pd.to_numeric(df.get(("Dotation & Trésorerie", "Montant"), 0), errors="coerce").fillna(0) > 0)
+        & (pd.to_numeric(df.get(("Synthèse POS & Finances", "Somme_POS_Serve"), 0), errors="coerce").fillna(0) == 0)
+    ]
+    if not dot_no_act.empty:
+        st.markdown("##### ⚠️ Alertes Terrain")
+        noms = ", ".join([f"**{r.get(('Acteur', 'Nom'), '')}** ({int(r.get(('Dotation & Trésorerie', 'Montant'), 0)):,} FCFA)" for _, r in dot_no_act.iterrows()])
+        st.warning(f"🚨 **Dotation sans distribution** : {noms} ont reçu une dotation sans POS servi.")
 
 
 def _style_persistence(df: pd.DataFrame):
@@ -1110,50 +1745,115 @@ def _style_persistence(df: pd.DataFrame):
 # Export — services/export_service.py exclusivement
 # ---------------------------------------------------------------------------
 
-def _split_commercial_views(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Sépare le tableau commercial en deux sections :
-    1. DSM Activity : Activité générale, dotation, FU, heures, transactions, ventes HVC/Others, TR, TPW intraday.
-       Exclut totalement les colonnes de portefeuille et de couverture.
-    2. Taux de Couverture : Portefeuille, POS attribués, POS touchés, taux de couverture, persistance, ventes & TR.
-       Exclut totalement la dotation, les heures, le FU et les fenêtres TPW.
+def _split_commercial_views(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Sépare le tableau commercial en trois sections strictes MultiIndex :
+    1. DSM Activity : Activité générale, dotation, FU, heures, transactions, HVC (Served, FD, TR), Others (Served, FD, TR), Synthèse Ventes & POS et fenêtres TPW.
+    2. Couverture - Wallet : Commercial, Objectifs & Couverture, HVC_Wallet, Others_Wallet, Synthèse Wallet.
+    3. Couverture - No Wallet : Commercial, HVC_No_Wallet, Others_No_Wallet, Synthèse No_Wallet.
     """
-    # 1. DSM Activity : exclut portefeuille, attribution, couverture et persistance
-    cov_excluded_from_dsm = {
-        "HVC_Attrib", "Others_Attrib", "Tot_Attrib", "POS_Touches",
-        "Couv_Tot (%)", "Couv_HVC (%)", "Couv_Others (%)", "Persistance (%)",
-        "Taux_Couverture (%)", "Taux_Couverture_HVC (%)", "Taux_Couverture_Autres(MVC/LVC) (%)",
-        "Taux_Persistance (%)", "POS_Attribues", "POS_Attribues_HVC", "POS_Attribues_Others",
-    }
-    dsm_cols = [c for c in df.columns if c not in cov_excluded_from_dsm]
+    # 1. DSM Activity
+    dsm_base_cols = [
+        ("Commercial", "Zone_Centre"), ("Commercial", "Zone_SA"), ("Commercial", "Nom"), ("Commercial", "Numero"),
+        ("Temps & Activité", "Nb_Jours"), ("Temps & Activité", "1ere_Trans"), ("Temps & Activité", "Dern_Trans"), ("Temps & Activité", "Nb_Trans"),
+        ("Dotation & Trésorerie", "Heure"), ("Dotation & Trésorerie", "Montant"), ("Dotation & Trésorerie", "FU"),
+        ("HVC", "Served"), ("HVC", "FD"), ("HVC", "TR_(%)"),
+        ("Others", "Served"), ("Others", "FD"), ("Others", "TR_(%)"),
+        ("Synthèse Ventes & POS", "Somme_POS_Serve"), ("Synthèse Ventes & POS", "Somme_FD"), ("Synthèse Ventes & POS", "TR_General_(%)"),
+    ]
+    tpw_cols = [c for c in df.columns if isinstance(c, tuple) and c[0] == "Work Progress"]
+    dsm_cols = [c for c in dsm_base_cols if c in df.columns] + tpw_cols
     dsm_df = df[dsm_cols].copy()
 
-    # 2. Taux de Couverture : exclut dotation, FU, heures et fenêtres TPW
-    dsm_excluded_from_cov = {
-        "Dotation", "Dotation_Montant", "H_Dotation", "Heure_Dotation",
-        "FU", "FU (Float Up)", "1ere_Trans", "Premiere_Trans", "Dern_Trans", "Derniere_Trans",
-    }
-    cov_cols_raw = [
-        c for c in df.columns 
-        if c not in dsm_excluded_from_cov and not str(c).startswith("TPW ")
+    # 2. Couverture - Wallet
+    cov_wallet_cols = [
+        ("Commercial", "Zone_Centre"), ("Commercial", "Zone_SA"), ("Commercial", "Nom"), ("Commercial", "Numero"),
+        ("Objectifs & Couverture", "HVC_Attrib"), ("Objectifs & Couverture", "Others_Attrib"), ("Objectifs & Couverture", "Tot_Attrib"),
+        ("Objectifs & Couverture", "POS_Touches"),
+        ("Objectifs & Couverture", "Couv_HVC_(%)"), ("Objectifs & Couverture", "Couv_Others_(%)"), ("Objectifs & Couverture", "Couv_Tot_(%)"),
+        ("Objectifs & Couverture", "Persistance_(%)"),
+        ("HVC_Wallet", "Served"), ("HVC_Wallet", "FD"), ("HVC_Wallet", "TR_(%)"),
+        ("Others_Wallet", "Served"), ("Others_Wallet", "FD"), ("Others_Wallet", "TR_(%)"),
     ]
+    cov_wallet_df = df[[c for c in cov_wallet_cols if c in df.columns]].copy()
+    hvc_w_s = pd.to_numeric(cov_wallet_df.get(("HVC_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    oth_w_s = pd.to_numeric(cov_wallet_df.get(("Others_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    hvc_w_fd = pd.to_numeric(cov_wallet_df.get(("HVC_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    oth_w_fd = pd.to_numeric(cov_wallet_df.get(("Others_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    cov_wallet_df[("Synthèse Wallet", "Total_Served")] = (hvc_w_s + oth_w_s).astype(int)
+    cov_wallet_df[("Synthèse Wallet", "Total_FD")] = (hvc_w_fd + oth_w_fd).astype(int)
 
-    id_cols = [c for c in ["Zone_Centre", "Zone_SA", "Commercial", "Num_Ccial"] if c in cov_cols_raw]
-    activity_cols = [c for c in ["Nb_Jours"] if c in cov_cols_raw]
-    port_cols = [c for c in ["HVC_Attrib", "Others_Attrib", "Tot_Attrib", "POS_Touches"] if c in cov_cols_raw]
-    rate_cols = [c for c in ["Couv_Tot (%)", "Couv_HVC (%)", "Couv_Others (%)", "Persistance (%)"] if c in cov_cols_raw]
-    rest_cols = [c for c in cov_cols_raw if c not in (id_cols + activity_cols + port_cols + rate_cols)]
+    # 3. Couverture - No Wallet
+    cov_no_wallet_cols = [
+        ("Commercial", "Zone_Centre"), ("Commercial", "Zone_SA"), ("Commercial", "Nom"), ("Commercial", "Numero"),
+        ("HVC_No_Wallet", "Served"), ("HVC_No_Wallet", "FD"), ("HVC_No_Wallet", "TR_(%)"),
+        ("Others_No_Wallet", "Served"), ("Others_No_Wallet", "FD"), ("Others_No_Wallet", "TR_(%)"),
+    ]
+    cov_no_wallet_df = df[[c for c in cov_no_wallet_cols if c in df.columns]].copy()
+    hvc_nw_s = pd.to_numeric(cov_no_wallet_df.get(("HVC_No_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    oth_nw_s = pd.to_numeric(cov_no_wallet_df.get(("Others_No_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    hvc_nw_fd = pd.to_numeric(cov_no_wallet_df.get(("HVC_No_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    oth_nw_fd = pd.to_numeric(cov_no_wallet_df.get(("Others_No_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    cov_no_wallet_df[("Synthèse No_Wallet", "Total_Served")] = (hvc_nw_s + oth_nw_s).astype(int)
+    cov_no_wallet_df[("Synthèse No_Wallet", "Total_FD")] = (hvc_nw_fd + oth_nw_fd).astype(int)
 
-    ordered_cov_cols = id_cols + activity_cols + port_cols + rate_cols + rest_cols
-    cov_df = df[ordered_cov_cols].copy()
+    return dsm_df, cov_wallet_df, cov_no_wallet_df
 
-    return dsm_df, cov_df
+
+def _split_pr_caisse_views(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Sépare le tableau PR & Caisses en 3 sous-vues MultiIndex :
+    1. DSM Activity : Acteur, Temps, Dotation & Trésorerie, HVC (Served, FD), Others (Served, FD), Synthèse POS & Finances.
+    2. Couverture - Wallet : Acteur, Objectifs & Couverture, HVC_Wallet, Others_Wallet, Synthèse Wallet.
+    3. Couverture - No Wallet : Acteur, HVC_No_Wallet, Others_No_Wallet, Synthèse No_Wallet.
+    """
+    # 1. DSM Activity
+    dsm_cols = [
+        ("Acteur", "Type"), ("Acteur", "Territoire"), ("Acteur", "Localisation"), ("Acteur", "Nom"),
+        ("Temps", "Nb_Jours"),
+        ("Dotation & Trésorerie", "Nom"), ("Dotation & Trésorerie", "Montant"), ("Dotation & Trésorerie", "Float_Up"),
+        ("HVC", "Served"), ("HVC", "FD"),
+        ("Others", "Served"), ("Others", "FD"),
+        ("Synthèse POS & Finances", "Somme_POS_Serve"), ("Synthèse POS & Finances", "Somme_FD"),
+    ]
+    dsm_df = df[[c for c in dsm_cols if c in df.columns]].copy()
+
+    # 2. Couverture - Wallet
+    cov_wallet_cols = [
+        ("Acteur", "Type"), ("Acteur", "Territoire"), ("Acteur", "Localisation"), ("Acteur", "Nom"),
+        ("Objectifs & Couverture", "POS_Attribues"), ("Objectifs & Couverture", "POS_Touches"),
+        ("Objectifs & Couverture", "Taux_Couverture_(%)"), ("Objectifs & Couverture", "Taux_Persistance_(%)"),
+        ("HVC_Wallet", "Served"), ("HVC_Wallet", "FD"),
+        ("Others_Wallet", "Served"), ("Others_Wallet", "FD"),
+    ]
+    cov_wallet_df = df[[c for c in cov_wallet_cols if c in df.columns]].copy()
+    hvc_w_s = pd.to_numeric(cov_wallet_df.get(("HVC_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    oth_w_s = pd.to_numeric(cov_wallet_df.get(("Others_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    hvc_w_fd = pd.to_numeric(cov_wallet_df.get(("HVC_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    oth_w_fd = pd.to_numeric(cov_wallet_df.get(("Others_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    cov_wallet_df[("Synthèse Wallet", "Total_Served")] = (hvc_w_s + oth_w_s).astype(int)
+    cov_wallet_df[("Synthèse Wallet", "Total_FD")] = (hvc_w_fd + oth_w_fd).astype(int)
+
+    # 3. Couverture - No Wallet
+    cov_no_wallet_cols = [
+        ("Acteur", "Type"), ("Acteur", "Territoire"), ("Acteur", "Localisation"), ("Acteur", "Nom"),
+        ("HVC_No_Wallet", "Served"), ("HVC_No_Wallet", "FD"),
+        ("Others_No_Wallet", "Served"), ("Others_No_Wallet", "FD"),
+    ]
+    cov_no_wallet_df = df[[c for c in cov_no_wallet_cols if c in df.columns]].copy()
+    hvc_nw_s = pd.to_numeric(cov_no_wallet_df.get(("HVC_No_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    oth_nw_s = pd.to_numeric(cov_no_wallet_df.get(("Others_No_Wallet", "Served"), 0), errors="coerce").fillna(0)
+    hvc_nw_fd = pd.to_numeric(cov_no_wallet_df.get(("HVC_No_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    oth_nw_fd = pd.to_numeric(cov_no_wallet_df.get(("Others_No_Wallet", "FD"), 0), errors="coerce").fillna(0)
+    cov_no_wallet_df[("Synthèse No_Wallet", "Total_Served")] = (hvc_nw_s + oth_nw_s).astype(int)
+    cov_no_wallet_df[("Synthèse No_Wallet", "Total_FD")] = (hvc_nw_fd + oth_nw_fd).astype(int)
+
+    return dsm_df, cov_wallet_df, cov_no_wallet_df
 
 
 def _render_sub_export(
     prefix: str,
     df: pd.DataFrame,
     styles: dict[str, Any],
-    group_col: Optional[str],
+    group_col: Optional[Any],
     title: str,
     key_suffix: str,
 ) -> None:
@@ -1196,6 +1896,7 @@ def _render_sub_export(
             if st.button(f"📦 Générer ZIP ({title})", key=f"btn_zip_{key_suffix}"):
                 with st.spinner(f"Génération du ZIP {title}..."):
                     groupable = df[df[group_col].astype(str) != ""]
+                    groupable = groupable[~groupable.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
                     st.session_state[zip_key] = to_grouped_zip(
                         groupable,
                         group_col=group_col,
@@ -1217,14 +1918,14 @@ def _render_commercial_exports(
     prefix: str,
     full_df: pd.DataFrame,
     styles: dict[str, Any],
-    group_col: Optional[str],
+    group_col: Optional[Any],
     filter_sig: str,
 ) -> None:
-    dsm_df, cov_df = _split_commercial_views(full_df)
+    dsm_df, cov_wallet_df, cov_no_wallet_df = _split_commercial_views(full_df)
     has_group = bool(group_col) and group_col in full_df.columns
 
-    st.markdown("##### 1. 📊 Section DSM Activity (Activité Générale, Ventes & TPW)")
-    st.caption("Contient l'activité générale, dotation, float-up, transactions, ventes HVC/Autres, TR et fenêtres TPW. Exclut portefeuille et couverture.")
+    st.markdown("##### 1. 📊 Section DSM Activity (Activité Opérationnelle & Ventes Générales)")
+    st.caption("Contient l'activité opérationnelle, dotation, float-up, transactions, volumes ventes globaux, POS servis globaux, rotations globales et fenêtres TPW. Exclut portefeuille et couverture.")
     dsm_styles = {**styles, "sheet_name": "DSM Activity"}
     _render_sub_export(
         prefix=f"{prefix}_dsm_activity",
@@ -1236,40 +1937,293 @@ def _render_commercial_exports(
     )
 
     st.write("")
-    st.markdown("##### 2. 🎯 Section Taux de Couverture (Portefeuille, Attribution & Couverture)")
-    st.caption("Contient le portefeuille, POS attribués, POS touchés, taux de couverture, persistance et volumes globaux. Exclut dotation, FU, heures et TPW.")
-    cov_styles = {**styles, "sheet_name": "Taux de Couverture"}
-    _render_sub_export(
-        prefix=f"{prefix}_taux_couverture",
-        df=cov_df,
-        styles=cov_styles,
-        group_col=group_col if has_group else None,
-        title="Taux de Couverture",
-        key_suffix=f"cov_{filter_sig}",
-    )
+    st.markdown("##### 2. 🎯 Section Taux de Couverture (Portefeuille & Hors Portefeuille)")
+    st.caption("Comprend les deux volets distincts : Couverture - Wallet (Portefeuille Attribué) et Couverture - No Wallet (Hors Portefeuille / Conquête & Dépannage).")
+
+    col_excel, col_img_w, col_img_nw = st.columns([1.5, 1.5, 1.5])
+    with col_excel:
+        cov_sheets = {
+            "Couverture - Wallet": cov_wallet_df,
+            "Couverture - No Wallet": cov_no_wallet_df,
+        }
+        excel_cov_bytes = to_excel_sheets(cov_sheets, styles=styles)
+        st.download_button(
+            label="📊 Télécharger Excel Couverture [.xlsx] (2 Feuilles)",
+            data=excel_cov_bytes,
+            file_name=f"{prefix}_taux_couverture.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{prefix}_btn_excel_cov_{filter_sig}",
+        )
+
+    with col_img_w:
+        img_w_key = f"{prefix}_img_wallet_{filter_sig}"
+        if st.button("🖼️ Générer l'image (Wallet - Portefeuille)", key=f"btn_img_wallet_{filter_sig}"):
+            with st.spinner("Génération de l'image (Wallet)..."):
+                w_styles = {**styles, "sheet_name": "Couverture - Wallet"}
+                st.session_state[img_w_key] = to_image(cov_wallet_df, styles=w_styles, title="Couverture - Wallet")
+        if st.session_state.get(img_w_key):
+            st.download_button(
+                "⬇️ Télécharger l'image (Wallet)",
+                st.session_state[img_w_key],
+                f"{prefix}_couverture_wallet.png",
+                "image/png",
+                key=f"dl_img_wallet_{filter_sig}",
+            )
+
+    with col_img_nw:
+        img_nw_key = f"{prefix}_img_nowallet_{filter_sig}"
+        if st.button("🖼️ Générer l'image (No Wallet - Hors Portefeuille)", key=f"btn_img_nowallet_{filter_sig}"):
+            with st.spinner("Génération de l'image (No Wallet)..."):
+                nw_styles = {**styles, "sheet_name": "Couverture - No Wallet"}
+                st.session_state[img_nw_key] = to_image(cov_no_wallet_df, styles=nw_styles, title="Couverture - No Wallet")
+        if st.session_state.get(img_nw_key):
+            st.download_button(
+                "⬇️ Télécharger l'image (No Wallet)",
+                st.session_state[img_nw_key],
+                f"{prefix}_couverture_nowallet.png",
+                "image/png",
+                key=f"dl_img_nowallet_{filter_sig}",
+            )
+
+    col_csv_w, col_csv_nw = st.columns([1.5, 1.5])
+    with col_csv_w:
+        st.download_button(
+            "CSV (Wallet - Portefeuille)",
+            to_csv(cov_wallet_df),
+            f"{prefix}_couverture_wallet.csv",
+            "text/csv",
+            key=f"{prefix}_csv_wallet_{filter_sig}",
+        )
+    with col_csv_nw:
+        st.download_button(
+            "CSV (No Wallet - Hors Portefeuille)",
+            to_csv(cov_no_wallet_df),
+            f"{prefix}_couverture_nowallet.csv",
+            "text/csv",
+            key=f"{prefix}_csv_nowallet_{filter_sig}",
+        )
+
+    if has_group:
+        col_zip_w, col_zip_nw = st.columns([1.5, 1.5])
+        with col_zip_w:
+            zip_w_key = f"{prefix}_zip_wallet_{filter_sig}"
+            if st.button("📦 Générer ZIP (Wallet par centre)", key=f"btn_zip_wallet_{filter_sig}"):
+                with st.spinner("Génération du ZIP (Wallet)..."):
+                    groupable_w = cov_wallet_df[cov_wallet_df[group_col].astype(str) != ""]
+                    groupable_w = groupable_w[~groupable_w.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+                    st.session_state[zip_w_key] = to_grouped_zip(
+                        groupable_w,
+                        group_col=group_col,
+                        export="image",
+                        styles={**styles, "sheet_name": "Couverture - Wallet"},
+                        filename_prefix=f"{prefix}_wallet",
+                    )
+            if st.session_state.get(zip_w_key):
+                st.download_button(
+                    "⬇️ Télécharger ZIP (Wallet)",
+                    st.session_state[zip_w_key],
+                    f"{prefix}_wallet_par_groupe.zip",
+                    "application/zip",
+                    key=f"dl_zip_wallet_{filter_sig}",
+                )
+        with col_zip_nw:
+            zip_nw_key = f"{prefix}_zip_nowallet_{filter_sig}"
+            if st.button("📦 Générer ZIP (No Wallet par centre)", key=f"btn_zip_nowallet_{filter_sig}"):
+                with st.spinner("Génération du ZIP (No Wallet)..."):
+                    groupable_nw = cov_no_wallet_df[cov_no_wallet_df[group_col].astype(str) != ""]
+                    groupable_nw = groupable_nw[~groupable_nw.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+                    st.session_state[zip_nw_key] = to_grouped_zip(
+                        groupable_nw,
+                        group_col=group_col,
+                        export="image",
+                        styles={**styles, "sheet_name": "Couverture - No Wallet"},
+                        filename_prefix=f"{prefix}_nowallet",
+                    )
+            if st.session_state.get(zip_nw_key):
+                st.download_button(
+                    "⬇️ Télécharger ZIP (No Wallet)",
+                    st.session_state[zip_nw_key],
+                    f"{prefix}_nowallet_par_groupe.zip",
+                    "application/zip",
+                    key=f"dl_zip_nowallet_{filter_sig}",
+                )
 
     st.write("")
-    st.markdown("##### 3. 📑 Classeur Excel Complet (2 Feuilles : DSM Activity + Taux de Couverture)")
-    st.caption("Exporte un classeur Excel unique réunissant les deux sections dans deux feuilles distinctes avec styles et mises en forme appliquées.")
+    st.markdown("##### 3. 📑 Classeur Excel Complet (3 Feuilles : DSM Activity + Couverture Wallet + Couverture No Wallet)")
+    st.caption("Exporte un classeur Excel unique réunissant les trois sections dans trois feuilles distinctes.")
     col_full, _ = st.columns([2, 2])
     with col_full:
-        sheets_data = {
+        sheets_all = {
             "DSM Activity": dsm_df,
-            "Taux de Couverture": cov_df,
+            "Couverture - Wallet": cov_wallet_df,
+            "Couverture - No Wallet": cov_no_wallet_df,
         }
-        excel_all_bytes = to_excel_sheets(sheets_data, styles=styles)
+        excel_all_bytes = to_excel_sheets(sheets_all, styles=styles)
         st.download_button(
-            label="📑 Télécharger Excel Complet [.xlsx] (2 Feuilles)",
+            label="📑 Télécharger Excel Complet [.xlsx] (3 Feuilles)",
             data=excel_all_bytes,
-            file_name=f"{prefix}_complet.xlsx",
+            file_name=f"{prefix}_complet_3feuilles.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"{prefix}_btn_excel_combined_{filter_sig}",
         )
 
 
-def _render_exports(prefix: str, df: pd.DataFrame, styles: dict[str, Any], group_col: Optional[str]) -> None:
+def _render_pr_caisse_exports(
+    prefix: str,
+    full_df: pd.DataFrame,
+    styles: dict[str, Any],
+    group_col: Optional[Any],
+    filter_sig: str,
+) -> None:
+    dsm_df, cov_wallet_df, cov_no_wallet_df = _split_pr_caisse_views(full_df)
+    has_group = bool(group_col) and group_col in full_df.columns
+
+    st.markdown("##### 1. 📊 Section DSM Activity (Activité Générale & Distribution)")
+    st.caption("Contient l'activité générale, dotation, float-up, HVC total, Others total et synthèse globale.")
+    dsm_styles = {**styles, "sheet_name": "DSM Activity"}
+    _render_sub_export(
+        prefix=f"{prefix}_dsm_activity",
+        df=dsm_df,
+        styles=dsm_styles,
+        group_col=group_col if has_group else None,
+        title="DSM Activity",
+        key_suffix=f"dsm_{filter_sig}",
+    )
+
+    st.write("")
+    st.markdown("##### 2. 🎯 Section Taux de Couverture (Portefeuille Point Relais & Hors Portefeuille)")
+    st.caption("Comprend les deux volets distincts : Couverture - Wallet (Portefeuille Attribué PR) et Couverture - No Wallet (Hors Portefeuille / Vente Libre).")
+
+    col_excel, col_img_w, col_img_nw = st.columns([1.5, 1.5, 1.5])
+    with col_excel:
+        cov_sheets = {
+            "Couverture - Wallet": cov_wallet_df,
+            "Couverture - No Wallet": cov_no_wallet_df,
+        }
+        excel_cov_bytes = to_excel_sheets(cov_sheets, styles=styles)
+        st.download_button(
+            label="📊 Télécharger Excel Couverture [.xlsx] (2 Feuilles)",
+            data=excel_cov_bytes,
+            file_name=f"{prefix}_taux_couverture.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{prefix}_btn_excel_cov_{filter_sig}",
+        )
+
+    with col_img_w:
+        img_w_key = f"{prefix}_img_wallet_{filter_sig}"
+        if st.button("🖼️ Générer l'image (Wallet - Portefeuille)", key=f"btn_img_wallet_{filter_sig}"):
+            with st.spinner("Génération de l'image (Wallet)..."):
+                w_styles = {**styles, "sheet_name": "Couverture - Wallet"}
+                st.session_state[img_w_key] = to_image(cov_wallet_df, styles=w_styles, title="Couverture - Wallet")
+        if st.session_state.get(img_w_key):
+            st.download_button(
+                "⬇️ Télécharger l'image (Wallet)",
+                st.session_state[img_w_key],
+                f"{prefix}_couverture_wallet.png",
+                "image/png",
+                key=f"dl_img_wallet_{filter_sig}",
+            )
+
+    with col_img_nw:
+        img_nw_key = f"{prefix}_img_nowallet_{filter_sig}"
+        if st.button("🖼️ Générer l'image (No Wallet - Hors Portefeuille)", key=f"btn_img_nowallet_{filter_sig}"):
+            with st.spinner("Génération de l'image (No Wallet)..."):
+                nw_styles = {**styles, "sheet_name": "Couverture - No Wallet"}
+                st.session_state[img_nw_key] = to_image(cov_no_wallet_df, styles=nw_styles, title="Couverture - No Wallet")
+        if st.session_state.get(img_nw_key):
+            st.download_button(
+                "⬇️ Télécharger l'image (No Wallet)",
+                st.session_state[img_nw_key],
+                f"{prefix}_couverture_nowallet.png",
+                "image/png",
+                key=f"dl_img_nowallet_{filter_sig}",
+            )
+
+    col_csv_w, col_csv_nw = st.columns([1.5, 1.5])
+    with col_csv_w:
+        st.download_button(
+            "CSV (Wallet - Portefeuille)",
+            to_csv(cov_wallet_df),
+            f"{prefix}_couverture_wallet.csv",
+            "text/csv",
+            key=f"{prefix}_csv_wallet_{filter_sig}",
+        )
+    with col_csv_nw:
+        st.download_button(
+            "CSV (No Wallet - Hors Portefeuille)",
+            to_csv(cov_no_wallet_df),
+            f"{prefix}_couverture_nowallet.csv",
+            "text/csv",
+            key=f"{prefix}_csv_nowallet_{filter_sig}",
+        )
+
+    if has_group:
+        col_zip_w, col_zip_nw = st.columns([1.5, 1.5])
+        with col_zip_w:
+            zip_w_key = f"{prefix}_zip_wallet_{filter_sig}"
+            if st.button("📦 Générer ZIP (Wallet par territoire)", key=f"btn_zip_wallet_{filter_sig}"):
+                with st.spinner("Génération du ZIP (Wallet)..."):
+                    groupable_w = cov_wallet_df[cov_wallet_df[group_col].astype(str) != ""]
+                    groupable_w = groupable_w[~groupable_w.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+                    st.session_state[zip_w_key] = to_grouped_zip(
+                        groupable_w,
+                        group_col=group_col,
+                        export="image",
+                        styles={**styles, "sheet_name": "Couverture - Wallet"},
+                        filename_prefix=f"{prefix}_wallet",
+                    )
+            if st.session_state.get(zip_w_key):
+                st.download_button(
+                    "⬇️ Télécharger ZIP (Wallet)",
+                    st.session_state[zip_w_key],
+                    f"{prefix}_wallet_par_territoire.zip",
+                    "application/zip",
+                    key=f"dl_zip_wallet_{filter_sig}",
+                )
+        with col_zip_nw:
+            zip_nw_key = f"{prefix}_zip_nowallet_{filter_sig}"
+            if st.button("📦 Générer ZIP (No Wallet par territoire)", key=f"btn_zip_nowallet_{filter_sig}"):
+                with st.spinner("Génération du ZIP (No Wallet)..."):
+                    groupable_nw = cov_no_wallet_df[cov_no_wallet_df[group_col].astype(str) != ""]
+                    groupable_nw = groupable_nw[~groupable_nw.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
+                    st.session_state[zip_nw_key] = to_grouped_zip(
+                        groupable_nw,
+                        group_col=group_col,
+                        export="image",
+                        styles={**styles, "sheet_name": "Couverture - No Wallet"},
+                        filename_prefix=f"{prefix}_nowallet",
+                    )
+            if st.session_state.get(zip_nw_key):
+                st.download_button(
+                    "⬇️ Télécharger ZIP (No Wallet)",
+                    st.session_state[zip_nw_key],
+                    f"{prefix}_nowallet_par_territoire.zip",
+                    "application/zip",
+                    key=f"dl_zip_nowallet_{filter_sig}",
+                )
+
+    st.write("")
+    st.markdown("##### 3. 📑 Classeur Excel Complet (3 Feuilles : DSM Activity + Couverture Wallet + Couverture No Wallet)")
+    st.caption("Exporte un classeur Excel unique réunissant les trois sections dans trois feuilles distinctes.")
+    col_full, _ = st.columns([2, 2])
+    with col_full:
+        sheets_all = {
+            "DSM Activity": dsm_df,
+            "Couverture - Wallet": cov_wallet_df,
+            "Couverture - No Wallet": cov_no_wallet_df,
+        }
+        excel_all_bytes = to_excel_sheets(sheets_all, styles=styles)
+        st.download_button(
+            label="📑 Télécharger Excel Complet [.xlsx] (3 Feuilles)",
+            data=excel_all_bytes,
+            file_name=f"{prefix}_complet_3feuilles.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{prefix}_btn_excel_combined_{filter_sig}",
+        )
+
+
+def _render_exports(prefix: str, df: pd.DataFrame, styles: dict[str, Any], group_col: Optional[Any]) -> None:
     has_group_export = bool(group_col) and group_col in df.columns
-    # Colonnes : CSV | Excel | Image | ZIP (si groupe)
     cols = st.columns(4 if has_group_export else 3)
 
     cols[0].download_button("CSV", to_csv(df), f"{prefix}.csv", "text/csv", key=f"{prefix}_csv")
@@ -1282,7 +2236,6 @@ def _render_exports(prefix: str, df: pd.DataFrame, styles: dict[str, Any], group
         key=f"{prefix}_xlsx",
     )
 
-    # Export image PNG — isolé derrière un bouton pour ne pas bloquer le chargement
     with cols[2]:
         img_key = f"{prefix}_image_bytes"
         if st.button("🖼️ Générer l'image", key=f"{prefix}_btn_gen_img"):
@@ -1303,6 +2256,7 @@ def _render_exports(prefix: str, df: pd.DataFrame, styles: dict[str, Any], group
             if st.button("🖼️ Générer ZIP par groupe", key=f"{prefix}_btn_gen_zip"):
                 with st.spinner("Génération du ZIP..."):
                     groupable = df[df[group_col].astype(str) != ""]
+                    groupable = groupable[~groupable.iloc[:, 0].astype(str).str.upper().eq("TOTAL")]
                     st.session_state[zip_key] = to_grouped_zip(
                         groupable, group_col=group_col,
                         export="image", styles=styles,

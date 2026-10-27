@@ -373,9 +373,9 @@ def _render_strategic_table(context: ConqueteContext) -> None:
 
     styled = disp.style
     if has_cov:
-        styled = styled.applymap(_style_coverage, subset=["Taux_Couverture_pct"])
+        styled = styled.map(_style_coverage, subset=["Taux_Couverture_pct"])
     if has_emp:
-        styled = styled.applymap(_style_emp, subset=["Nb_Empiétements"])
+        styled = styled.map(_style_emp, subset=["Nb_Empiétements"])
 
 
     # Graphiques de synthèse stratégique
@@ -399,7 +399,7 @@ def _render_strategic_table(context: ConqueteContext) -> None:
             fig.add_hline(y=_SEUIL_COV_ROUGE, line_dash="dot", line_color="red",
                           annotation_text=f"Seuil rouge ({_SEUIL_COV_ROUGE}%)")
             fig.update_xaxes(tickangle=-30)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with col2:
         if "Zone_SA" in df.columns and "Productivite_Moy_FCFA" in df.columns:
@@ -414,14 +414,14 @@ def _render_strategic_table(context: ConqueteContext) -> None:
                 color_continuous_scale="Blues",
                 height=350,
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
     # Filtrer le tableau affiché
     disp_df = disp[disp["Zone_SA"].apply(_is_valid_label)] if "Zone_SA" in disp.columns else disp
     st.dataframe(styled if not ("Zone_SA" in disp.columns) else
-                 disp_df.style.pipe(lambda s: s.applymap(_style_coverage, subset=["Taux_Couverture_pct"]) if has_cov else s)
-                             .pipe(lambda s: s.applymap(_style_emp, subset=["Nb_Empiétements"]) if has_emp else s),
-                 use_container_width=True, hide_index=True, height=520)
+                 disp_df.style.pipe(lambda s: s.map(_style_coverage, subset=["Taux_Couverture_pct"]) if has_cov else s)
+                             .pipe(lambda s: s.map(_style_emp, subset=["Nb_Empiétements"]) if has_emp else s),
+                 width="stretch", hide_index=True, height=520)
     _render_exports("conquete_tableau_strategique", df[df["Zone_SA"].apply(_is_valid_label)] if "Zone_SA" in df.columns else df, {})
 
 

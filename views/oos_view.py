@@ -524,12 +524,17 @@ def _render_layout(options: dict):
         min_d = datetime.now().date()
         max_d = datetime.now().date()
 
+    from datetime import timedelta
+    default_start = max(min_d, max_d - timedelta(days=7)) if max_d else min_d
+
     c0, c1, c2, c3, c4, c5, c6 = st.columns([1.8, 1.2, 1.2, 1.2, 1.2, 1.2, 1.4])
 
     with c0:
         dates_selected = st.date_input(
             "Plage de dates",
-            value=(min_d, max_d),
+            value=(default_start, max_d),
+            min_value=min_d,
+            max_value=max_d,
             key="ohv_dates",
         )
         if isinstance(dates_selected, (tuple, list)) and len(dates_selected) == 2:
@@ -539,7 +544,7 @@ def _render_layout(options: dict):
             date_start = dates_selected[0].strftime("%Y-%m-%d")
             date_end = dates_selected[0].strftime("%Y-%m-%d")
         else:
-            date_start = min_d_str
+            date_start = default_start.strftime("%Y-%m-%d")
             date_end = max_d_str
 
     with c1:
@@ -712,8 +717,8 @@ def _render_commercial_ranking_section(df_full: pd.DataFrame) -> None:
             except Exception:
                 return ""
 
-        styled = df_ranking.style.applymap(_style_score, subset=["Score Final (/100)"])
-        st.dataframe(styled, use_container_width=True, hide_index=True, height=350)
+        styled = df_ranking.style.map(_style_score, subset=["Score Final (/100)"])
+        st.dataframe(styled, width="stretch", hide_index=True, height=350)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -901,8 +906,8 @@ def _render_listing_tab(listing: OosListingContext, base_filters: OosHvcFilters)
             "taux_oos_pct": "Taux OOS (%)",
         })
         st.dataframe(
-            cov_display.style.applymap(_oos_cell_color, subset=["Taux OOS (%)"]),
-            use_container_width=True, hide_index=True,
+            cov_display.style.map(_oos_cell_color, subset=["Taux OOS (%)"]),
+            width="stretch", hide_index=True,
         )
 
     st.markdown("#### Détail des POS en rupture")
@@ -1152,10 +1157,10 @@ def _render_hvc_frequently_oos(filters: OosHvcFilters) -> None:
 
         styled = (
             display.style
-            .applymap(_color_oos, subset=["% OOS moyen"])
-            .applymap(_color_snaps, subset=["Nb snapshots en OOS"])
+            .map(_color_oos, subset=["% OOS moyen"])
+            .map(_color_snaps, subset=["Nb snapshots en OOS"])
         )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True)
 
         # Export rapide
         col_csv, col_xlsx = st.columns(2)

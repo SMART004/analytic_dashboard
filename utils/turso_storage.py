@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from io import BytesIO
 from typing import Any
@@ -10,6 +11,8 @@ import pandas as pd
 import streamlit as st
 
 from models.db import get_connection
+
+logger = logging.getLogger(__name__)
 
 REMOTE_RETRIES = 3
 
@@ -64,8 +67,8 @@ def save_bytes(bucket: str, file_path: str, content: bytes, file_name: str | Non
             conn.execute(
                 """
                 INSERT INTO stored_files
-                    (bucket, file_path, file_name, content, content_type, content_hash)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (bucket, file_path, file_name, content, content_type, content_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(bucket, file_path) DO UPDATE SET
                     file_name=excluded.file_name,
                     content=excluded.content,
@@ -75,6 +78,41 @@ def save_bytes(bucket: str, file_path: str, content: bytes, file_name: str | Non
                 """,
                 (bucket, file_path, file_name, content, content_type, digest),
             )
+
+        # Écriture disque locale dans storage/bucket/file_path
+        try:
+            from utils.config_storage import LOCAL_STORAGE_PATH
+            dest_file = LOCAL_STORAGE_PATH / bucket / file_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            dest_file.write_bytes(content)
+        except Exception as disk_err:
+            logger.debug("Écriture disque du fichier %s/%s ignorée : %s", bucket, file_path, disk_err)
+
+        # Réplication immédiate vers Turso si disponible
+        from utils.config_storage import USE_LOCAL_STORAGE
+        if USE_LOCAL_STORAGE:
+            try:
+                from models.db import get_remote_connection
+                remote_conn = get_remote_connection()
+                if remote_conn:
+                    with remote_conn:
+                        _ensure_table(remote_conn)
+                        remote_conn.execute(
+                            """
+                            INSERT INTO stored_files
+                                (bucket, file_path, file_name, content, content_type, content_hash, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            ON CONFLICT(bucket, file_path) DO UPDATE SET
+                                file_name=excluded.file_name,
+                                content=excluded.content,
+                                content_type=excluded.content_type,
+                                content_hash=excluded.content_hash,
+                                created_at=CURRENT_TIMESTAMP
+                            """,
+                            (bucket, file_path, file_name, content, content_type, digest),
+                        )
+            except Exception as remote_err:
+                logger.debug("Réplication directe vers Turso ignorée : %s", remote_err)
 
     _with_retries(operation, f"Enregistrement de {file_path}")
 
@@ -101,7 +139,7 @@ def list_objects(bucket: str, prefix: str = "") -> list[dict[str, Any]]:
                 SELECT file_path, file_name, content_hash, created_at
                 FROM stored_files
                 WHERE bucket = ? AND file_path LIKE ?
-                ORDER BY file_path
+                ORDER BY created_at DESC, file_path ASC
                 """,
                 (bucket, f"{prefix}%"),
             ).fetchall()
@@ -115,19 +153,49 @@ def list_objects(bucket: str, prefix: str = "") -> list[dict[str, Any]]:
 
 def delete_objects(bucket: str, prefix: str = "") -> int:
     def operation():
+        deleted = 0
         with get_connection() as conn:
             _ensure_table(conn)
             cursor = conn.execute(
                 "DELETE FROM stored_files WHERE bucket = ? AND file_path LIKE ?",
                 (bucket, f"{prefix}%"),
             )
-            return cursor.rowcount
+            deleted = cursor.rowcount
+
+        # Suppression des fichiers sur disque
+        try:
+            from utils.config_storage import LOCAL_STORAGE_PATH
+            folder_disk = LOCAL_STORAGE_PATH / bucket / prefix.rstrip("/")
+            if folder_disk.exists() and folder_disk.is_dir():
+                for f in folder_disk.glob("*"):
+                    if f.is_file():
+                        f.unlink()
+        except Exception:
+            pass
+
+        # Suppression immédiate sur Turso si disponible
+        from utils.config_storage import USE_LOCAL_STORAGE
+        if USE_LOCAL_STORAGE:
+            try:
+                from models.db import get_remote_connection
+                remote_conn = get_remote_connection()
+                if remote_conn:
+                    with remote_conn:
+                        _ensure_table(remote_conn)
+                        remote_conn.execute(
+                            "DELETE FROM stored_files WHERE bucket = ? AND file_path LIKE ?",
+                            (bucket, f"{prefix}%"),
+                        )
+            except Exception:
+                pass
+
+        return deleted
 
     return _with_retries(operation, f"Suppression du dossier {prefix or bucket}")
 
 
 def save_file(file, folder_name: str) -> str:
-    """Remplace les fichiers d'un dossier de configuration par le nouveau fichier."""
+    """Remplace les fichiers d'un dossier de configuration par le nouveau fichier (local + Turso)."""
     delete_objects("settings", f"{folder_name}/")
     path = f"{folder_name}/{file.name}"
     save_bytes("settings", path, file.getvalue(), file.name, getattr(file, "type", None))

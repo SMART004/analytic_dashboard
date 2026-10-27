@@ -5,8 +5,6 @@ import io
 import zipfile
 from typing import Dict, Any
 
-from models.oos_model import get_all_pos, get_hvc_commercial_mapping
-
 def process_float_priorisation(
     df: pd.DataFrame, 
     col_msisdn: str, 

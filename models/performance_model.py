@@ -10,12 +10,16 @@ segment (dotations, fenêtres Work Progress, quota HVC) reste au niveau du
 controller, sur un volume de lignes déjà réduit.
 """
 
+import logging
+import re
 import sqlite3
 from typing import Any, Literal, Optional
 
 import pandas as pd
 
 from models.db import get_connection
+
+logger = logging.getLogger(__name__)
 
 Segment = Literal["commercial", "pr_caisse", "cds"]
 
@@ -43,6 +47,24 @@ def _with_conn(conn: Optional[sqlite3.Connection]):
     if conn is None:
         return get_connection(), True
     return conn, False
+
+
+def _safe_read_sql(query: str, conn: sqlite3.Connection, params: list[Any]) -> pd.DataFrame:
+    """Exécute une requête SQL avec repli automatique sans INDEXED BY si une erreur I/O ou index survient."""
+    try:
+        return pd.read_sql_query(query, conn, params=params)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "indexed by" in query.lower() and (
+            "disk i/o error" in msg or "no such index" in msg or "operationalerror" in msg
+        ):
+            logger.warning(
+                "Alerte index SQLite sur la requête (%s). Exécution automatique de secours sans INDEXED BY.",
+                exc,
+            )
+            fallback_query = re.sub(r"INDEXED\s+BY\s+\w+", "", query, flags=re.IGNORECASE)
+            return pd.read_sql_query(fallback_query, conn, params=params)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -215,18 +237,27 @@ def get_cds_commercial_flows(
             where.append("t.amount >= ?")
             params.append(min_amount)
 
+        # Index seek ultra-rapide pour CDS
+        cursor = conn.cursor()
+        cursor.execute("SELECT cds_msisdn FROM cds_referentiel")
+        cds_msisdns = [r[0] for r in cursor.fetchall() if r[0]]
+        if cds_msisdns:
+            placeholders = ",".join(["?"] * len(cds_msisdns))
+            where.append(f"t.from_msisdn IN ({placeholders})")
+            params.extend(cds_msisdns)
+
         query = f"""
             SELECT
                 cds.cds_msisdn AS Actor_MSISDN,
                 SUM(t.amount) AS FD_Commercial,
                 COUNT(DISTINCT c.ccial_msisdn) AS Ccial_Serve
-            FROM transactions t
+            FROM transactions t INDEXED BY idx_tx_from_date
             INNER JOIN cds_referentiel cds ON t.from_msisdn = cds.cds_msisdn
             INNER JOIN referentiel_commerciaux c ON t.to_msisdn = c.ccial_msisdn
             WHERE {' AND '.join(where)}
             GROUP BY cds.cds_msisdn
         """
-        return pd.read_sql_query(query, conn, params=params)
+        return _safe_read_sql(query, conn, params=params)
     finally:
         if close:
             conn.close()
@@ -276,12 +307,22 @@ def get_performance_transactions(
             where.append("t.amount >= ?")
             params.append(min_amount)
 
+        if segment == "cds":
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT {actor_id} FROM {actor_table}")
+            actor_msisdns = [r[0] for r in cursor.fetchall() if r[0]]
+            if actor_msisdns:
+                placeholders = ",".join(["?"] * len(actor_msisdns))
+                where.append(f"t.from_msisdn IN ({placeholders})")
+                params.extend(actor_msisdns)
+
         extra_cols = ""
         if segment == "pr_caisse":
             extra_cols = ", a.territoire AS Actor_Territoire, a.localisation AS Actor_Localisation, a.type_point AS Type_Point"
         elif segment == "commercial":
             extra_cols = ", a.zone_centre AS Zone_Centre, a.zone_territoire AS Zone_Territoire, a.zone_sa AS Zone_SA"
 
+        idx_clause = "INDEXED BY idx_tx_from_date" if segment == "cds" else ""
         query = f"""
             SELECT
                 t.id, t.tx_date AS Date, t.date_only AS Date_only, t.hour AS Hour,
@@ -290,12 +331,12 @@ def get_performance_transactions(
                 a.{actor_id} AS Actor_MSISDN, a.{actor_name} AS Actor_Nom,
                 p.segment_group AS POS_Segment, p.site_key AS POS_Site_Key
                 {extra_cols}
-            FROM transactions t
+            FROM transactions t {idx_clause}
             INNER JOIN {actor_table} a ON t.from_msisdn = a.{actor_id}
             LEFT JOIN referentiel_pos p ON t.to_msisdn = p.agent_msisdn
             WHERE {' AND '.join(where)}
         """
-        df = pd.read_sql_query(query, conn, params=params)
+        df = _safe_read_sql(query, conn, params=params)
         if not df.empty and "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         return df
@@ -333,16 +374,26 @@ def get_dotation_transactions(
             where.append("t.hour < ?")
             params.append(hour_max)
 
+        if segment == "cds":
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT {actor_id} FROM {actor_table}")
+            actor_msisdns = [r[0] for r in cursor.fetchall() if r[0]]
+            if actor_msisdns:
+                placeholders = ",".join(["?"] * len(actor_msisdns))
+                where.append(f"t.to_msisdn IN ({placeholders})")
+                params.extend(actor_msisdns)
+
+        idx_clause = "INDEXED BY idx_tx_to_date" if segment == "cds" else ""
         query = f"""
             SELECT
                 t.id, t.tx_date AS Date, t.date_only AS Date_only, t.hour AS Hour,
                 t.amount AS Amount, t.from_msisdn AS From_clean, t.to_msisdn AS To_clean,
                 a.{actor_id} AS Actor_MSISDN, a.{actor_name} AS Actor_Nom
-            FROM transactions t
+            FROM transactions t {idx_clause}
             INNER JOIN {actor_table} a ON t.to_msisdn = a.{actor_id}
             WHERE {' AND '.join(where)}
         """
-        df = pd.read_sql_query(query, conn, params=params)
+        df = _safe_read_sql(query, conn, params=params)
         if not df.empty and "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         return df

@@ -137,12 +137,12 @@ def _render_cluster_ranking(context: DashboardContext) -> None:
 
     fig = px.bar(df, x="Groupe", y="Score", color="Score", height=280)
     fig.update_layout(xaxis_title="", yaxis_title="Score")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     if "Taux OOS (%)" in df.columns:
         from views.oos_view import _oos_cell_color
-        st.dataframe(df.style.applymap(_oos_cell_color, subset=["Taux OOS (%)"]), use_container_width=True, hide_index=True)
+        st.dataframe(df.style.map(_oos_cell_color, subset=["Taux OOS (%)"]), width="stretch", hide_index=True)
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
     _render_exports("dashboard_classement_clusters", df, context.export_styles)
 
 
@@ -225,9 +225,9 @@ def _render_territory_section(context: DashboardContext) -> None:
         disp_df = disp_df[~disp_df["Territoire"].astype(str).str.strip().isin(_INVALID)]
     if "Taux OOS (%)" in disp_df.columns:
         from views.oos_view import _oos_cell_color
-        st.dataframe(disp_df.style.applymap(_oos_cell_color, subset=["Taux OOS (%)"]), use_container_width=True, hide_index=True)
+        st.dataframe(disp_df.style.map(_oos_cell_color, subset=["Taux OOS (%)"]), width="stretch", hide_index=True)
     else:
-        st.dataframe(disp_df, use_container_width=True, hide_index=True)
+        st.dataframe(disp_df, width="stretch", hide_index=True)
     _render_exports("dashboard_territoires", disp_df, context.export_styles)
 
 

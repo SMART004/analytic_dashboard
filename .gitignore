@@ -11,3 +11,8 @@ test.py
 test2.py
 test3.py
 storage/
+build/
+dist/
+creer_zip_distribution.bat
+Lancer_Application_Bureau.bat
+run_desktop.bat

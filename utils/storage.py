@@ -136,17 +136,7 @@ def upload_file_by_month(uploaded_file, bucket):
     folder = f"{year}-" + "-".join(f"{month.month:02d}" for month in sorted(months))
     
     target_name = clean_filename(uploaded_file.name)
-    for item in _objects(bucket, f"{folder}/"):
-        if item["name"].endswith(target_name):
-            old_source_file = item["name"].split("/", 1)[1]
-            try:
-                with get_connection() as conn:
-                    conn.execute("DELETE FROM transactions WHERE source_file = ?", (old_source_file,))
-                    conn.commit()
-            except Exception:
-                pass
-            delete_objects(bucket, item["name"])
-            
+    # Pour les transactions et autres données volumétriques : ajout sans supprimer ni remplacer
     _save_uploaded(bucket, f"{folder}/{file_hash(uploaded_file)}__{target_name}", uploaded_file)
     return True
 

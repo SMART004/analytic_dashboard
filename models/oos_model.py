@@ -92,6 +92,8 @@ def _fetch_oos_listing(
     segment_group: Optional[str] = None,
     sitename: Optional[str] = None,
     is_oos: Optional[int] = None,
+    hour_min: Optional[int] = None,
+    hour_max: Optional[int] = None,
 ) -> pd.DataFrame:
     conn = get_connection()
     try:
@@ -102,15 +104,23 @@ def _fetch_oos_listing(
             where_clauses.append("l.snapshot_date = ?")
             params.append(snapshot_date)
         if date_start:
-            where_clauses.append("DATE(l.snapshot_date) >= DATE(?)")
-            params.append(date_start)
+            start_str = str(date_start) if len(str(date_start)) > 10 else f"{date_start} 00:00:00"
+            where_clauses.append("l.snapshot_date >= ?")
+            params.append(start_str)
         if date_end:
-            where_clauses.append("DATE(l.snapshot_date) <= DATE(?)")
-            params.append(date_end)
+            end_str = str(date_end) if len(str(date_end)) > 10 else f"{date_end} 23:59:59"
+            where_clauses.append("l.snapshot_date <= ?")
+            params.append(end_str)
+        if (hour_min is not None and hour_min > 0) or (hour_max is not None and hour_max < 23):
+            h_min = 0 if hour_min is None else int(hour_min)
+            h_max = 23 if hour_max is None else int(hour_max)
+            where_clauses.append("CAST(SUBSTR(l.snapshot_date, 12, 2) AS INTEGER) BETWEEN ? AND ?")
+            params.extend([h_min, h_max])
         if zone and zone not in ("Tous", "Toutes"):
             where_clauses.append("l.zone = ?")
             params.append(zone)
-        if zone_sa and zone_sa not in ("Tous", "Toutes"):
+        has_zone_sa = bool(zone_sa and zone_sa not in ("Tous", "Toutes"))
+        if has_zone_sa:
             where_clauses.append("p.zone_sa = ?")
             params.append(zone_sa)
         if territory and territory not in ("Tous", "Toutes"):
@@ -130,20 +140,64 @@ def _fetch_oos_listing(
             params.append(is_oos)
 
         where_str = " AND ".join(where_clauses)
-        query = f"""
-        SELECT l.msisdn, l.day_target, l.float_amount, l.oos_pct, l.is_oos, l.last_trx_time,
-               l.site_key, COALESCE(s.sitename, l.site_key) AS sitename, COALESCE(s.sitename, l.site_key) AS locality,
-               l.cluster, l.territory, l.zone, p.zone_sa AS zone_sa, l.segment_group, l.snapshot_date
-        FROM listing_oos l
-        LEFT JOIN sites s ON l.site_key = s.site_key
+        sa_join = """
         LEFT JOIN (
             SELECT agent_msisdn, MAX(zone_sa) AS zone_sa
             FROM referentiel_pos
             GROUP BY agent_msisdn
         ) p ON l.msisdn = p.agent_msisdn
+        """ if has_zone_sa else ""
+        sa_col = "p.zone_sa AS zone_sa" if has_zone_sa else "NULL AS zone_sa"
+
+        query = f"""
+        SELECT l.msisdn, l.day_target, l.float_amount, l.oos_pct, l.is_oos, l.last_trx_time,
+               l.site_key, COALESCE(s.sitename, l.site_key) AS sitename, COALESCE(s.sitename, l.site_key) AS locality,
+               l.cluster, l.territory, l.zone, {sa_col}, l.segment_group, l.snapshot_date
+        FROM listing_oos l
+        LEFT JOIN sites s ON l.site_key = s.site_key
+        {sa_join}
         WHERE {where_str}
         """
-        return pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(query, conn, params=params)
+        if "snapshot_date" in df.columns and ((hour_min is not None and hour_min > 0) or (hour_max is not None and hour_max < 23)):
+            h_min = 0 if hour_min is None else int(hour_min)
+            h_max = 23 if hour_max is None else int(hour_max)
+            s_hours = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.hour
+            if s_hours.notna().any():
+                df = df[s_hours.between(h_min, h_max)].reset_index(drop=True)
+        return df
+    finally:
+        conn.close()
+
+
+def get_latest_snapshot_in_range(
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
+    hour_min: int = 0,
+    hour_max: int = 23,
+) -> Optional[str]:
+    """Trouve le snapshot le plus récent correspondant à la plage de dates et d'heures."""
+    conn = get_connection()
+    try:
+        where = ["1=1"]
+        params = []
+        if date_start:
+            s_start = str(date_start) if len(str(date_start)) > 10 else f"{date_start} 00:00:00"
+            where.append("snapshot_date >= ?")
+            params.append(s_start)
+        if date_end:
+            s_end = str(date_end) if len(str(date_end)) > 10 else f"{date_end} 23:59:59"
+            where.append("snapshot_date <= ?")
+            params.append(s_end)
+        if hour_min > 0 or hour_max < 23:
+            where.append("CAST(SUBSTR(snapshot_date, 12, 2) AS INTEGER) BETWEEN ? AND ?")
+            params.extend([hour_min, hour_max])
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT MAX(snapshot_date) FROM listing_oos WHERE {' AND '.join(where)}", params)
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
     finally:
         conn.close()
 
@@ -159,6 +213,8 @@ def get_oos_listing(
     segment_group: Optional[str] = None,
     sitename: Optional[str] = None,
     is_oos: Optional[int] = None,
+    hour_min: Optional[int] = None,
+    hour_max: Optional[int] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> pd.DataFrame:
     """Récupère les données listing_oos avec enrichissement du nom de site (sitename/locality)."""
@@ -174,6 +230,8 @@ def get_oos_listing(
             segment_group=segment_group,
             sitename=sitename,
             is_oos=is_oos,
+            hour_min=hour_min,
+            hour_max=hour_max,
         )
     where_clauses = ["1=1"]
     params = []
@@ -182,15 +240,23 @@ def get_oos_listing(
         where_clauses.append("l.snapshot_date = ?")
         params.append(snapshot_date)
     if date_start:
-        where_clauses.append("DATE(l.snapshot_date) >= DATE(?)")
-        params.append(date_start)
+        start_str = str(date_start) if len(str(date_start)) > 10 else f"{date_start} 00:00:00"
+        where_clauses.append("l.snapshot_date >= ?")
+        params.append(start_str)
     if date_end:
-        where_clauses.append("DATE(l.snapshot_date) <= DATE(?)")
-        params.append(date_end)
+        end_str = str(date_end) if len(str(date_end)) > 10 else f"{date_end} 23:59:59"
+        where_clauses.append("l.snapshot_date <= ?")
+        params.append(end_str)
+    if (hour_min is not None and hour_min > 0) or (hour_max is not None and hour_max < 23):
+        h_min = 0 if hour_min is None else int(hour_min)
+        h_max = 23 if hour_max is None else int(hour_max)
+        where_clauses.append("CAST(SUBSTR(l.snapshot_date, 12, 2) AS INTEGER) BETWEEN ? AND ?")
+        params.extend([h_min, h_max])
     if zone and zone not in ("Tous", "Toutes"):
         where_clauses.append("l.zone = ?")
         params.append(zone)
-    if zone_sa and zone_sa not in ("Tous", "Toutes"):
+    has_zone_sa = bool(zone_sa and zone_sa not in ("Tous", "Toutes"))
+    if has_zone_sa:
         where_clauses.append("p.zone_sa = ?")
         params.append(zone_sa)
     if territory and territory not in ("Tous", "Toutes"):
@@ -210,20 +276,226 @@ def get_oos_listing(
         params.append(is_oos)
 
     where_str = " AND ".join(where_clauses)
-    query = f"""
-    SELECT l.msisdn, l.day_target, l.float_amount, l.oos_pct, l.is_oos, l.last_trx_time,
-           l.site_key, COALESCE(s.sitename, l.site_key) AS sitename, COALESCE(s.sitename, l.site_key) AS locality,
-           l.cluster, l.territory, l.zone, p.zone_sa AS zone_sa, l.segment_group, l.snapshot_date
-    FROM listing_oos l
-    LEFT JOIN sites s ON l.site_key = s.site_key
+    sa_join = """
     LEFT JOIN (
         SELECT agent_msisdn, MAX(zone_sa) AS zone_sa
         FROM referentiel_pos
         GROUP BY agent_msisdn
     ) p ON l.msisdn = p.agent_msisdn
+    """ if has_zone_sa else ""
+    sa_col = "p.zone_sa AS zone_sa" if has_zone_sa else "NULL AS zone_sa"
+
+    query = f"""
+    SELECT l.msisdn, l.day_target, l.float_amount, l.oos_pct, l.is_oos, l.last_trx_time,
+           l.site_key, COALESCE(s.sitename, l.site_key) AS sitename, COALESCE(s.sitename, l.site_key) AS locality,
+           l.cluster, l.territory, l.zone, {sa_col}, l.segment_group, l.snapshot_date
+    FROM listing_oos l
+    LEFT JOIN sites s ON l.site_key = s.site_key
+    {sa_join}
     WHERE {where_str}
     """
-    return pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(query, conn, params=params)
+    if "snapshot_date" in df.columns and ((hour_min is not None and hour_min > 0) or (hour_max is not None and hour_max < 23)):
+        h_min = 0 if hour_min is None else int(hour_min)
+        h_max = 23 if hour_max is None else int(hour_max)
+        s_hours = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.hour
+        if s_hours.notna().any():
+            df = df[s_hours.between(h_min, h_max)].reset_index(drop=True)
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_oos_average_frequency(
+    zone: Optional[str] = None,
+    territory: Optional[str] = None,
+    cluster: Optional[str] = None,
+    zone_sa: Optional[str] = None,
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
+) -> float:
+    """Calcule la fréquence OOS moyenne directement via SQLite sans charger les lignes en RAM."""
+    conn = get_connection()
+    try:
+        where_clauses = ["1=1"]
+        params = []
+        if date_start:
+            start_str = str(date_start) if len(str(date_start)) > 10 else f"{date_start} 00:00:00"
+            where_clauses.append("snapshot_date >= ?")
+            params.append(start_str)
+        if date_end:
+            end_str = str(date_end) if len(str(date_end)) > 10 else f"{date_end} 23:59:59"
+            where_clauses.append("snapshot_date <= ?")
+            params.append(end_str)
+        if zone and zone not in ("Tous", "Toutes"):
+            where_clauses.append("zone = ?")
+            params.append(zone)
+        if territory and territory not in ("Tous", "Toutes"):
+            where_clauses.append("territory = ?")
+            params.append(territory)
+        if cluster and cluster not in ("Tous", "Toutes"):
+            where_clauses.append("cluster = ?")
+            params.append(cluster)
+
+        where_str = " AND ".join(where_clauses)
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT AVG(cnt) FROM (SELECT COUNT(DISTINCT snapshot_date) as cnt FROM listing_oos WHERE {where_str} GROUP BY msisdn)",
+            params
+        )
+        row = cursor.fetchone()
+        return round(float(row[0]), 1) if row and row[0] is not None else 0.0
+    except Exception:
+        return 0.0
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_oos_progression_series(
+    zone: Optional[str] = None,
+    territory: Optional[str] = None,
+    cluster: Optional[str] = None,
+    segment_group: Optional[str] = None,
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
+    hour_min: Optional[int] = None,
+    hour_max: Optional[int] = None,
+) -> pd.DataFrame:
+    """Agrégation horaire ultra-rapide directement en SQLite pour la série temporelle de progression."""
+    conn = get_connection()
+    try:
+        where_clauses = ["1=1"]
+        params = []
+        if date_start:
+            start_str = str(date_start) if len(str(date_start)) > 10 else f"{date_start} 00:00:00"
+            where_clauses.append("snapshot_date >= ?")
+            params.append(start_str)
+        if date_end:
+            end_str = str(date_end) if len(str(date_end)) > 10 else f"{date_end} 23:59:59"
+            where_clauses.append("snapshot_date <= ?")
+            params.append(end_str)
+        if (hour_min is not None and hour_min > 0) or (hour_max is not None and hour_max < 23):
+            h_min = 0 if hour_min is None else int(hour_min)
+            h_max = 23 if hour_max is None else int(hour_max)
+            where_clauses.append("CAST(SUBSTR(snapshot_date, 12, 2) AS INTEGER) BETWEEN ? AND ?")
+            params.extend([h_min, h_max])
+        if zone and zone not in ("Tous", "Toutes"):
+            where_clauses.append("zone = ?")
+            params.append(zone)
+        if territory and territory not in ("Tous", "Toutes"):
+            where_clauses.append("territory = ?")
+            params.append(territory)
+        if cluster and cluster not in ("Tous", "Toutes"):
+            where_clauses.append("cluster = ?")
+            params.append(cluster)
+        if segment_group and segment_group not in ("Tous", "Toutes", ""):
+            where_clauses.append("segment_group = ?")
+            params.append(segment_group)
+
+        where_str = " AND ".join(where_clauses)
+        query = f"""
+        SELECT SUBSTR(snapshot_date, 1, 10) as d,
+               CAST(SUBSTR(snapshot_date, 12, 2) AS INTEGER) as h,
+               COUNT(DISTINCT msisdn) as nb
+        FROM listing_oos
+        WHERE {where_str}
+        GROUP BY d, h
+        ORDER BY d, h
+        """
+        return pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_hvc_frequently_oos_data(
+    zone: Optional[str] = None,
+    territory: Optional[str] = None,
+    cluster: Optional[str] = None,
+    min_snapshots: int = 2,
+) -> pd.DataFrame:
+    """Agrège les POS HVC fréquemment en rupture directement en base SQLite."""
+    conn = get_connection()
+    try:
+        where_clauses = ["UPPER(segment_group) LIKE '%HVC%'"]
+        params = []
+        if zone and zone not in ("Tous", "Toutes"):
+            where_clauses.append("zone = ?")
+            params.append(zone)
+        if territory and territory not in ("Tous", "Toutes"):
+            where_clauses.append("territory = ?")
+            params.append(territory)
+        if cluster and cluster not in ("Tous", "Toutes"):
+            where_clauses.append("cluster = ?")
+            params.append(cluster)
+
+        where_str = " AND ".join(where_clauses)
+        params.append(min_snapshots)
+        query = f"""
+        SELECT msisdn,
+               COUNT(DISTINCT COALESCE(last_trx_time, snapshot_date)) AS nb_snapshots_oos,
+               ROUND(AVG(oos_pct), 1) AS pct_oos_moy,
+               MAX(snapshot_date) AS last_snapshot_date,
+               territory, cluster, segment_group
+        FROM listing_oos
+        WHERE {where_str}
+        GROUP BY msisdn
+        HAVING nb_snapshots_oos >= ?
+        ORDER BY nb_snapshots_oos DESC, pct_oos_moy DESC
+        """
+        return pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def get_oos_history_for_msisdns(
+    msisdns: list[str],
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
+) -> pd.DataFrame:
+    """Charge l'historique de snapshots UNIQUEMENT pour la liste des POS demandés (léger en mémoire)."""
+    if not msisdns:
+        return pd.DataFrame()
+    conn = get_connection()
+    try:
+        where_clauses = []
+        params = []
+        if date_start:
+            start_str = str(date_start) if len(str(date_start)) > 10 else f"{date_start} 00:00:00"
+            where_clauses.append("snapshot_date >= ?")
+            params.append(start_str)
+        if date_end:
+            end_str = str(date_end) if len(str(date_end)) > 10 else f"{date_end} 23:59:59"
+            where_clauses.append("snapshot_date <= ?")
+            params.append(end_str)
+
+        date_clause = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
+        
+        # Découpage par lots pour éviter de dépasser la limite SQLITE_MAX_VARIABLE_NUMBER
+        batch_size = 900
+        frames = []
+        for i in range(0, len(msisdns), batch_size):
+            batch = msisdns[i:i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            q = f"""
+            SELECT msisdn, snapshot_date, last_trx_time
+            FROM listing_oos
+            WHERE msisdn IN ({placeholders}) {date_clause}
+            """
+            batch_params = list(batch) + params
+            df_batch = pd.read_sql_query(q, conn, params=batch_params)
+            if not df_batch.empty:
+                frames.append(df_batch)
+
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
 
 
 def get_oos_snapshot_options(conn: Optional[sqlite3.Connection] = None) -> list[dict]:
@@ -427,6 +699,25 @@ def insert_oos_rows(df: pd.DataFrame) -> int:
         inserted = len(rows_data)
 
         conn.commit()
+
+        # Ajout immédiat dans Turso sans remplacement si connecté
+        try:
+            from models.db import get_remote_connection
+            remote_conn = get_remote_connection()
+            if remote_conn:
+                with remote_conn:
+                    remote_conn.cursor().executemany(
+                        f"""
+                        INSERT OR IGNORE INTO listing_oos ({col_names})
+                        VALUES ({placeholders})
+                        """,
+                        rows_data,
+                    )
+                    remote_conn.commit()
+        except Exception as remote_err:
+            import logging
+            logging.getLogger(__name__).debug("Ajout direct OOS vers Turso ignoré: %s", remote_err)
+
         return inserted
     finally:
         conn.close()

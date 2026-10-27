@@ -232,12 +232,32 @@ def compute_pr_portfolio_metrics(
         )
 
     # 5. Métriques Hors-Portefeuille
-    outside_metrics = outside.group_by("Actor_MSISDN").agg(
-        [
-            pl.col("To_clean").n_unique().alias("Hors_Portefeuille_POS"),
-            pl.col("Amount").sum().round(0).cast(pl.Int64).alias("FD_Hors_Portefeuille"),
-        ]
-    )
+    if not outside.is_empty():
+        outside_with_hvc = outside.with_columns(
+            pl.col("To_clean").is_in(list(hvc_set)).alias("Is_HVC")
+        )
+        outside_metrics = outside_with_hvc.group_by("Actor_MSISDN").agg(
+            [
+                pl.col("To_clean").filter(pl.col("Is_HVC")).n_unique().alias("HVC_No_Wallet"),
+                pl.col("Amount").filter(pl.col("Is_HVC")).sum().round(0).cast(pl.Int64).alias("FD_HVC_No_Wallet"),
+                pl.col("To_clean").filter(~pl.col("Is_HVC")).n_unique().alias("Others_No_Wallet"),
+                pl.col("Amount").filter(~pl.col("Is_HVC")).sum().round(0).cast(pl.Int64).alias("FD_Others_No_Wallet"),
+                pl.col("To_clean").n_unique().alias("Hors_Portefeuille_POS"),
+                pl.col("Amount").sum().round(0).cast(pl.Int64).alias("FD_Hors_Portefeuille"),
+            ]
+        )
+    else:
+        outside_metrics = pl.DataFrame(
+            schema={
+                "Actor_MSISDN": pl.Utf8,
+                "HVC_No_Wallet": pl.Int64,
+                "FD_HVC_No_Wallet": pl.Int64,
+                "Others_No_Wallet": pl.Int64,
+                "FD_Others_No_Wallet": pl.Int64,
+                "Hors_Portefeuille_POS": pl.Int64,
+                "FD_Hors_Portefeuille": pl.Int64,
+            }
+        )
     result = result.join(outside_metrics, on="Actor_MSISDN", how="left")
 
     # 6. Attribués & Touchés
@@ -284,6 +304,10 @@ def compute_pr_portfolio_metrics(
         "HVC_Serve": pl.Int64,
         "Other_Serve": pl.Int64,
         "Hors_Portefeuille_POS": pl.Int64,
+        "HVC_No_Wallet": pl.Int64,
+        "FD_HVC_No_Wallet": pl.Int64,
+        "Others_No_Wallet": pl.Int64,
+        "FD_Others_No_Wallet": pl.Int64,
         "POS_Attribues": pl.Int64,
         "POS_Touches": pl.Int64,
         "Taux_Persistance": pl.Float64,

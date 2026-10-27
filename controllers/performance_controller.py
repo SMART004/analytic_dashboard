@@ -233,11 +233,18 @@ def build_performance_context(
         table["Sigma_HVC_Serve"] = 0
         table["Others_Wallet"] = 0
         table["Others_No_Wallet"] = 0
+        table["Tot_No_Wallet"] = 0
         table["Sigma_Others_Serve"] = 0
         table["Nb_Trans_HVC_Wallet"] = 0
         table["Nb_Trans_HVC_No_Wallet"] = 0
         table["Nb_Trans_Others_Wallet"] = 0
         table["Nb_Trans_Others_No_Wallet"] = 0
+        table["FD_HVC_Wallet"] = 0
+        table["FD_Others_Wallet"] = 0
+        table["FD_Tot_Wallet"] = 0
+        table["FD_HVC_No_Wallet"] = 0
+        table["FD_Others_No_Wallet"] = 0
+        table["FD_Tot_No_Wallet"] = 0
         table["TR_HVC_Wallet"] = 0.0
         table["TR_HVC_No_Wallet"] = 0.0
         table["TR_HVC_General"] = 0.0
@@ -261,8 +268,13 @@ def build_performance_context(
             table.loc[caisse_rows, ["POS_Touches", "POS_Attribues", "Taux_Couverture"]] = 0
             table.loc[caisse_rows, "Taux_Persistance"] = None
         if segment == "cds":
-            table = _enrich_cds_metrics(table, filters)
+            table = _build_cds_table(actor_pool, tx, filters)
+            return PerformanceContext(segment=segment, filters=filters, table=table, message="Aucune transaction sur la periode.")
         return PerformanceContext(segment=segment, filters=filters, table=table, message="Aucune transaction sur la periode.")
+
+    if segment == "cds":
+        table = _build_cds_table(actor_pool, tx, filters)
+        return PerformanceContext(segment=segment, filters=filters, table=table)
 
     hvc_set = get_hvc_msisdns()
     others_set = get_mvc_lvc_msisdns() if _SEGMENT_HVC_OTHERS_SPLIT[segment] else set()
@@ -335,6 +347,8 @@ def build_performance_context(
         "Others_Wallet", "Others_No_Wallet", "Sigma_Others_Serve",
         "Nb_Trans_HVC_Wallet", "Nb_Trans_HVC_No_Wallet",
         "Nb_Trans_Others_Wallet", "Nb_Trans_Others_No_Wallet",
+        "Tot_No_Wallet", "FD_HVC_Wallet", "FD_Others_Wallet", "FD_Tot_Wallet",
+        "FD_HVC_No_Wallet", "FD_Others_No_Wallet", "FD_Tot_No_Wallet",
         "Dotation_Montant", "FU",
     ]
     for col in numeric_cols:
@@ -354,9 +368,28 @@ def build_performance_context(
             table[rate_col] = pd.to_numeric(table[rate_col], errors="coerce").fillna(0.0)
 
     if segment == "pr_caisse":
-        table["Sigma_FD"] = pd.to_numeric(table["FD_HVC"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Others"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["FD_Hors_Portefeuille"], errors="coerce").fillna(0).astype(int)
-        table["Sigma_POS_Serve"] = pd.to_numeric(table["HVC_Serve"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["Other_Serve"], errors="coerce").fillna(0).astype(int) + pd.to_numeric(table["Hors_Portefeuille_POS"], errors="coerce").fillna(0).astype(int)
+        table["HVC_Wallet"] = pd.to_numeric(table.get("HVC_Serve", 0), errors="coerce").fillna(0).astype(int)
+        table["FD_HVC_Wallet"] = pd.to_numeric(table.get("FD_HVC", 0), errors="coerce").fillna(0).astype(int)
+        table["Others_Wallet"] = pd.to_numeric(table.get("Other_Serve", 0), errors="coerce").fillna(0).astype(int)
+        table["FD_Others_Wallet"] = pd.to_numeric(table.get("FD_Others", 0), errors="coerce").fillna(0).astype(int)
+
+        table["HVC_No_Wallet"] = pd.to_numeric(table.get("HVC_No_Wallet", 0), errors="coerce").fillna(0).astype(int)
+        table["FD_HVC_No_Wallet"] = pd.to_numeric(table.get("FD_HVC_No_Wallet", 0), errors="coerce").fillna(0).astype(int)
+        table["Others_No_Wallet"] = pd.to_numeric(table.get("Others_No_Wallet", 0), errors="coerce").fillna(0).astype(int)
+        table["FD_Others_No_Wallet"] = pd.to_numeric(table.get("FD_Others_No_Wallet", 0), errors="coerce").fillna(0).astype(int)
+
+        table["HVC_Total_Served"] = table["HVC_Wallet"] + table["HVC_No_Wallet"]
+        table["FD_HVC_Total"] = table["FD_HVC_Wallet"] + table["FD_HVC_No_Wallet"]
+        table["Others_Total_Served"] = table["Others_Wallet"] + table["Others_No_Wallet"]
+        table["FD_Others_Total"] = table["FD_Others_Wallet"] + table["FD_Others_No_Wallet"]
+
+        table["Sigma_FD"] = table["FD_HVC_Total"] + table["FD_Others_Total"]
+        table["Sigma_POS_Serve"] = table["HVC_Total_Served"] + table["Others_Total_Served"]
     elif segment == "commercial":
+        table["HVC_Total_Served"] = pd.to_numeric(table.get("Sigma_HVC_Serve", 0), errors="coerce").fillna(0).astype(int)
+        table["FD_HVC_Total"] = pd.to_numeric(table.get("FD_HVC", 0), errors="coerce").fillna(0).astype(int)
+        table["Others_Total_Served"] = pd.to_numeric(table.get("Sigma_Others_Serve", 0), errors="coerce").fillna(0).astype(int)
+        table["FD_Others_Total"] = pd.to_numeric(table.get("FD_Others", 0), errors="coerce").fillna(0).astype(int)
         table["Sigma_FD"] = (table["FD_HVC"] + table["FD_Others"]).round(0).astype(int)
         table["Sigma_POS_Serve"] = (table["Sigma_HVC_Serve"] + table["Sigma_Others_Serve"]).astype(int)
         table["HVC_Serve"] = table["Sigma_HVC_Serve"]
@@ -412,33 +445,99 @@ def build_performance_context(
     if segment in _TOP10_SEGMENTS:
         top_commerciaux = _rank_top_actors(table, segment)
 
-    if segment == "cds":
-        table = _enrich_cds_metrics(table, filters)
-
     return PerformanceContext(segment=segment, filters=filters, table=table, top_commerciaux=top_commerciaux)
 
 
-def _enrich_cds_metrics(table: pd.DataFrame, filters: PerformanceFilters) -> pd.DataFrame:
-    table = table.copy()
-    quota = get_hvc_quota_by_cds().rename(columns={"nom_cds": "Actor_Nom"})
-    table = table.merge(quota, on="Actor_Nom", how="left")
-    table["nb_hvc_attribue"] = pd.to_numeric(table.get("nb_hvc_attribue"), errors="coerce").fillna(0).astype(int)
+def _build_cds_table(actor_pool: pd.DataFrame, tx: pd.DataFrame, filters: PerformanceFilters) -> pd.DataFrame:
+    """Calcul optimisé et fidèle aux règles métiers pour le segment CDS :
+    - HVC_Wallet (Served, FD) : Portefeuille HVC attribué au CDS dans hvc_cds_assignments
+    - HVC_No_Wallet (Served, FD) : Clients HVC hors portefeuille du CDS
+    - Others (Served, FD) : Clients hors HVC
+    - Synthèse POS (Somme_POS_Serve) : HVC_Wallet_Served + HVC_No_Wallet_Served + Others_Served (exclut les commerciaux)
+    - Commerciaux (Served, FD) : Réapprovisionnement des commerciaux par le CDS
+    - Finances (Somme_FD) : HVC_Wallet_FD + HVC_No_Wallet_FD + Others_FD + Ccial_FD
+    - Objectifs & Suivi : Nb_HVC_Attribue, Taux_Couverture_(%) = (HVC_Wallet_Served / Nb_HVC_Attribue) * 100
+    - Dotation : Nom, Montant reçus du master
+    """
+    assignments_df = get_hvc_cds_assignments()
+    if not assignments_df.empty:
+        assignments_df["clean_hvc"] = assignments_df["hvc_msisdn"].map(clean_phone)
+        assigned_dict = assignments_df.groupby("cds_nom")["clean_hvc"].apply(set).to_dict()
+    else:
+        assigned_dict = {}
 
-    commercial_flows = get_cds_commercial_flows(
+    hvc_set = get_hvc_msisdns()
+
+    comm_flows = get_cds_commercial_flows(
         start_date=filters.start_date,
         end_date=filters.end_date,
         min_amount=MIN_TRANSFER_AMOUNT,
     )
-    table = table.merge(commercial_flows, on="Actor_MSISDN", how="left")
-    for col in ["FD_Commercial", "Ccial_Serve"]:
-        table[col] = pd.to_numeric(table.get(col), errors="coerce").fillna(0)
+    dotation = _compute_dotation(filters, actor_pool)
 
-    table["Taux_Couverture_Quota"] = table.apply(
-        lambda row: round(row["HVC_Serve"] / row["nb_hvc_attribue"] * 100, 1)
-        if row["nb_hvc_attribue"] > 0 else None,
-        axis=1,
-    )
-    return table
+    rows = []
+    for _, actor in actor_pool.iterrows():
+        nom = actor["Actor_Nom"]
+        msisdn = str(actor["Actor_MSISDN"])
+        assigned_pos = assigned_dict.get(nom, set())
+        nb_hvc_attribue = len(assigned_pos)
+
+        tx_cds = tx[tx["Actor_MSISDN"] == msisdn] if not tx.empty else pd.DataFrame()
+        if tx_cds.empty:
+            nb_jours = 0
+            hvc_w_served = hvc_w_fd = 0
+            hvc_nw_served = hvc_nw_fd = 0
+            oth_served = oth_fd = 0
+            somme_pos_serve = 0
+        else:
+            nb_jours = int(tx_cds["Date_only"].nunique())
+            to_clean = tx_cds["To_clean"].astype(str)
+            amounts = pd.to_numeric(tx_cds["Amount"], errors="coerce").fillna(0)
+
+            is_w = to_clean.isin(assigned_pos)
+            is_nw = ~is_w & to_clean.isin(hvc_set)
+            is_oth = ~is_w & ~to_clean.isin(hvc_set)
+
+            hvc_w_served = int(to_clean[is_w].nunique())
+            hvc_w_fd = int(round(amounts[is_w].sum()))
+            hvc_nw_served = int(to_clean[is_nw].nunique())
+            hvc_nw_fd = int(round(amounts[is_nw].sum()))
+            oth_served = int(to_clean[is_oth].nunique())
+            oth_fd = int(round(amounts[is_oth].sum()))
+            somme_pos_serve = hvc_w_served + hvc_nw_served + oth_served
+
+        c_row = comm_flows[comm_flows["Actor_MSISDN"] == msisdn] if not comm_flows.empty else pd.DataFrame()
+        ccial_served = int(c_row["Ccial_Serve"].iloc[0]) if not c_row.empty else 0
+        ccial_fd = int(round(c_row["FD_Commercial"].iloc[0])) if not c_row.empty else 0
+
+        somme_fd = hvc_w_fd + hvc_nw_fd + oth_fd + ccial_fd
+        taux_couv = round(hvc_w_served / nb_hvc_attribue * 100, 1) if nb_hvc_attribue > 0 else 0.0
+
+        d_row = dotation[dotation["Actor_MSISDN"] == msisdn] if not dotation.empty else pd.DataFrame()
+        dot_nom = str(d_row["Dotation_Nom"].iloc[0]) if not d_row.empty and pd.notna(d_row["Dotation_Nom"].iloc[0]) else ""
+        dot_montant = int(round(pd.to_numeric(d_row["Dotation_Montant"].iloc[0], errors="coerce"))) if not d_row.empty else 0
+
+        rows.append({
+            "Actor_Nom": nom,
+            "Actor_MSISDN": msisdn,
+            "Nb_Jours": nb_jours,
+            "HVC_Wallet_Served": hvc_w_served,
+            "HVC_Wallet_FD": hvc_w_fd,
+            "HVC_No_Wallet_Served": hvc_nw_served,
+            "HVC_No_Wallet_FD": hvc_nw_fd,
+            "Others_Served": oth_served,
+            "Others_FD": oth_fd,
+            "Somme_POS_Serve": somme_pos_serve,
+            "Ccial_Serve": ccial_served,
+            "FD_Commercial": ccial_fd,
+            "Somme_FD": somme_fd,
+            "Nb_HVC_Attribue": nb_hvc_attribue,
+            "Taux_Couverture_Quota": taux_couv,
+            "Dotation_Nom": dot_nom,
+            "Dotation_Montant": dot_montant,
+        })
+
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -836,6 +935,8 @@ def _compute_commercial_coverage(
             "Others_Wallet", "Others_No_Wallet", "Sigma_Others_Serve", "Sigma_POS_Serve",
             "Nb_Trans_HVC_Wallet", "Nb_Trans_HVC_No_Wallet", "Nb_Trans_HVC",
             "Nb_Trans_Others_Wallet", "Nb_Trans_Others_No_Wallet", "Nb_Trans_Other",
+            "Tot_No_Wallet", "FD_HVC_Wallet", "FD_Others_Wallet", "FD_Tot_Wallet",
+            "FD_HVC_No_Wallet", "FD_Others_No_Wallet", "FD_Tot_No_Wallet",
         ]:
             base_cov[c] = 0
         return base_cov
@@ -962,6 +1063,16 @@ def _compute_commercial_coverage(
         nb_trans_others_no_wallet = int((~is_assigned & ~is_hvc).sum())
         nb_trans_other = nb_trans_others_wallet + nb_trans_others_no_wallet
 
+        # Montants FD (Ventes) Wallet vs No Wallet
+        amounts = pd.to_numeric(tx_comm["Amount"], errors="coerce").fillna(0)
+        fd_hvc_wallet = int(round(amounts[is_assigned & is_hvc].sum()))
+        fd_hvc_no_wallet = int(round(amounts[~is_assigned & is_hvc].sum()))
+        fd_others_wallet = int(round(amounts[is_assigned & ~is_hvc].sum()))
+        fd_others_no_wallet = int(round(amounts[~is_assigned & ~is_hvc].sum()))
+        fd_tot_wallet = fd_hvc_wallet + fd_others_wallet
+        fd_tot_no_wallet = fd_hvc_no_wallet + fd_others_no_wallet
+        tot_no_wallet = hvc_no_wallet + others_no_wallet
+
         # 4. Taux de couverture
         taux = round(n_touches / n_attribues * 100, 1) if n_attribues > 0 else 0.0
         taux_hvc = round(hvc_wallet / n_attribues_hvc * 100, 1) if n_attribues_hvc > 0 else 0.0
@@ -980,6 +1091,7 @@ def _compute_commercial_coverage(
             "Taux_Couverture_Others": taux_others,
             "HVC_Wallet": hvc_wallet,
             "HVC_No_Wallet": hvc_no_wallet,
+            "Tot_No_Wallet": tot_no_wallet,
             "Sigma_HVC_Serve": sigma_hvc_serve,
             "Others_Wallet": others_wallet,
             "Others_No_Wallet": others_no_wallet,
@@ -991,6 +1103,12 @@ def _compute_commercial_coverage(
             "Nb_Trans_Others_Wallet": nb_trans_others_wallet,
             "Nb_Trans_Others_No_Wallet": nb_trans_others_no_wallet,
             "Nb_Trans_Other": nb_trans_other,
+            "FD_HVC_Wallet": fd_hvc_wallet,
+            "FD_Others_Wallet": fd_others_wallet,
+            "FD_Tot_Wallet": fd_tot_wallet,
+            "FD_HVC_No_Wallet": fd_hvc_no_wallet,
+            "FD_Others_No_Wallet": fd_others_no_wallet,
+            "FD_Tot_No_Wallet": fd_tot_no_wallet,
             "Taux_Persistance": persistence_map.get(msisdn),
         })
 

@@ -2,7 +2,6 @@ import os
 import zipfile
 from io import BytesIO
 
-import dataframe_image as dfi
 import pandas as pd
 import streamlit as st
 
@@ -145,7 +144,7 @@ def _style_assignments(df):
 
     return (
         df.style
-        .applymap(color_count, subset=["Nb transactions"])
+        .map(color_count, subset=["Nb transactions"])
         .set_table_styles([
             {
                 "selector": "th",

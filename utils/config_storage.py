@@ -1,10 +1,19 @@
-# utils/config_storage.py
-
+import sys
 from pathlib import Path
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+if getattr(sys, "frozen", False):
+	BASE_DIR = Path(sys.executable).resolve().parent
+else:
+	BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Charger le fichier .env depuis BASE_DIR
+env_path = BASE_DIR / ".env"
+if env_path.exists():
+	load_dotenv(dotenv_path=env_path)
+else:
+	load_dotenv()
 
 
 def get_config_value(name: str, default: str | None = None) -> str | None:
@@ -37,7 +46,7 @@ _has_remote_database = bool(
 USE_LOCAL_STORAGE = _env_bool("USE_LOCAL_STORAGE", not _has_remote_database)
 
 # dossier racine local
-LOCAL_STORAGE_PATH = Path("storage")
+LOCAL_STORAGE_PATH = BASE_DIR / "storage"
 
 # settings
 SETTINGS_PATH = LOCAL_STORAGE_PATH / "settings"

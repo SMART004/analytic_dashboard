@@ -215,7 +215,41 @@ def sync_segment_to_sqlite(
                     if close:
                         active_conn.close()
 
-            if not ingestion_succeeded:
+            if ingestion_succeeded:
+                # Ajout direct dans Turso sans remplacement si connecté
+                try:
+                    from models.db import get_remote_connection
+                    remote_conn = get_remote_connection()
+                    if remote_conn:
+                        with remote_conn:
+                            with get_connection() as local_read:
+                                rows = local_read.execute(
+                                    """
+                                    SELECT tx_date, date_only, hour, tx_type, amount,
+                                           from_msisdn, to_msisdn, from_name, to_name, balance,
+                                           zone_sa_snapshot, territoire_snapshot, site_key_snapshot, source_file, file_hash
+                                    FROM transactions WHERE source_file = ?
+                                    """,
+                                    (source_name,),
+                                ).fetchall()
+                            if rows:
+                                batch_size = 2000
+                                for b_idx in range(0, len(rows), batch_size):
+                                    chunk = rows[b_idx : b_idx + batch_size]
+                                    remote_conn.cursor().executemany(
+                                        """
+                                        INSERT OR IGNORE INTO transactions (
+                                            tx_date, date_only, hour, tx_type, amount,
+                                            from_msisdn, to_msisdn, from_name, to_name, balance,
+                                            zone_sa_snapshot, territoire_snapshot, site_key_snapshot, source_file, file_hash
+                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        """,
+                                        chunk,
+                                    )
+                                remote_conn.commit()
+                except Exception as remote_err:
+                    logger.debug("Ajout direct transactions vers Turso ignoré: %s", remote_err)
+            else:
                 processed_files -= 1
                 failed_files += 1
                 logger.warning(
@@ -279,6 +313,37 @@ def sync_oos_to_sqlite(uploaded_file: Any, manual_snapshot_date: Optional[str] =
         finally:
             conn.close()
 
+        # Ajout immédiat dans Turso sans remplacement si connecté
+        try:
+            from models.db import get_remote_connection
+            remote_conn = get_remote_connection()
+            if remote_conn:
+                with remote_conn:
+                    with get_connection() as local_read:
+                        rows = local_read.execute(
+                            """
+                            SELECT msisdn, day_target, float_amount, oos_pct, is_oos, last_trx_time,
+                                   site_key, cluster, territory, zone, segment_group, snapshot_date
+                            FROM listing_oos WHERE snapshot_date = ?
+                            """,
+                            (snapshot_date,),
+                        ).fetchall()
+                    if rows:
+                        batch_size = 2000
+                        for b_idx in range(0, len(rows), batch_size):
+                            chunk = rows[b_idx : b_idx + batch_size]
+                            remote_conn.cursor().executemany(
+                                """
+                                INSERT OR IGNORE INTO listing_oos (
+                                    msisdn, day_target, float_amount, oos_pct, is_oos, last_trx_time,
+                                    site_key, cluster, territory, zone, segment_group, snapshot_date
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                chunk,
+                            )
+        except Exception as remote_err:
+            logger.debug("Ajout direct OOS vers Turso ignoré: %s", remote_err)
+
         return {"lignes_inserees": inserted, "snapshot_date": snapshot_date}
 
     except Exception as exc:
@@ -310,6 +375,25 @@ def sync_hvc_variation_to_sqlite(uploaded_file: Any) -> dict:
             inserted = ingest_hvc_variation_dataframe(conn, df, snapshot_timestamp, uploaded_file.name)
         finally:
             conn.close()
+
+        # Ajout immédiat dans Turso sans remplacement si connecté
+        try:
+            from models.db import get_remote_connection
+            remote_conn = get_remote_connection()
+            if remote_conn:
+                with remote_conn:
+                    with get_connection() as local_read:
+                        rows = local_read.execute(
+                            "SELECT site_key, day_hvc, oos_pct, snapshot_timestamp, source_file FROM hvc_variations WHERE snapshot_timestamp = ?",
+                            (snapshot_timestamp,),
+                        ).fetchall()
+                    if rows:
+                        remote_conn.cursor().executemany(
+                            "INSERT OR IGNORE INTO hvc_variations (site_key, day_hvc, oos_pct, snapshot_timestamp, source_file) VALUES (?, ?, ?, ?, ?)",
+                            rows,
+                        )
+        except Exception as remote_err:
+            logger.debug("Ajout direct HVC vers Turso ignoré: %s", remote_err)
 
         return {"lignes_inserees": inserted, "snapshot_timestamp": snapshot_timestamp}
 

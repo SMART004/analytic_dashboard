@@ -32,7 +32,12 @@ import polars as pl
 import streamlit as st
 
 from models.hvc_model import get_hvc_variations, get_hvc_snapshot_timestamps, get_hvc_commercial_mapping
-from models.oos_model import get_oos_listing, get_oos_filter_options, find_frequent_commercial_for_unassigned_pos, insert_oos_rows
+from models.oos_model import (
+    get_oos_listing, get_oos_filter_options, find_frequent_commercial_for_unassigned_pos,
+    insert_oos_rows, get_oos_average_frequency, get_oos_progression_series,
+    get_hvc_frequently_oos_data, get_oos_history_for_msisdns,
+    get_latest_snapshot_in_range
+)
 from models.pos_model import get_all_pos, get_pos_referentiel_count
 from utils.helpers import clean_phone
 
@@ -62,6 +67,49 @@ class OosHvcFilters:
     # Filtres specifiques HVC Variation
     snapshot_t1: Optional[str] = None
     snapshot_t2: Optional[str] = None
+
+
+def _filter_by_hour_range(df: pd.DataFrame, filters: OosHvcFilters) -> pd.DataFrame:
+    """Filtre les relevés OOS selon la plage horaire sélectionnée (hour_min à hour_max).
+    Priorité :
+    1. Heure du snapshot (snapshot_date), qui représente le moment exact où le relevé OOS a eu lieu.
+    2. Fallback sur l'heure de dernière transaction (last_trx_time) si snapshot_date est à 00:00:00 ou absent.
+    """
+    if (
+        df is None
+        or df.empty
+        or (filters.hour_min == 0 and filters.hour_max == 23)
+    ):
+        return df
+
+    hours = None
+    # 1. Extraction depuis snapshot_date (heure de la capture OOS)
+    if "snapshot_date" in df.columns:
+        s_dt = pd.to_datetime(df["snapshot_date"], errors="coerce")
+        valid_s = s_dt.dropna()
+        if not valid_s.empty and (valid_s.dt.hour != 0).any():
+            hours = s_dt.dt.hour
+        elif not valid_s.empty and (valid_s.dt.hour == 0).all():
+            # Snapshot sans composante horaire (00:00:00) : fallback sur last_trx_time si disponible
+            if "last_trx_time" in df.columns:
+                t_dt = pd.to_datetime(df["last_trx_time"], errors="coerce", format="mixed", dayfirst=True)
+                if t_dt.notna().any():
+                    hours = t_dt.dt.hour
+
+    # Si snapshot_date n'était pas présent ou sans heure valide
+    if hours is None and "last_trx_time" in df.columns:
+        t_dt = pd.to_datetime(df["last_trx_time"], errors="coerce", format="mixed", dayfirst=True)
+        if t_dt.notna().any():
+            hours = t_dt.dt.hour
+
+    if hours is None:
+        return df
+
+    mask = hours.between(filters.hour_min, filters.hour_max)
+    return df.loc[mask].copy()
+
+
+_filter_by_last_trx_hour = _filter_by_hour_range
 
 
 # ---------------------------------------------------------------------------
@@ -181,15 +229,14 @@ def _build_global_kpis(
 
         # Frequence OOS
         try:
-            all_oos = get_oos_listing(
+            kpis.frequence_oos = get_oos_average_frequency(
                 zone=filters.zone if filters.zone != "Toutes" else None,
                 territory=filters.territory if filters.territory != "Toutes" else None,
                 cluster=filters.cluster if filters.cluster != "Tous" else None,
                 zone_sa=filters.zone_sa if filters.zone_sa not in ("Toutes", "") else None,
+                date_start=filters.date_start,
+                date_end=filters.date_end,
             )
-            if not all_oos.empty and "msisdn" in all_oos.columns and "snapshot_date" in all_oos.columns:
-                freq = all_oos.groupby("msisdn")["snapshot_date"].nunique()
-                kpis.frequence_oos = round(freq.mean(), 1)
         except Exception:
             pass
 
@@ -409,18 +456,26 @@ def _build_listing_context_uncached(
 ) -> OosListingContext:
     snapshot_date = filters.snapshot_date
     if not snapshot_date:
-        options = get_oos_filter_options()
-        snapshot_date = options.get("latest_snapshot_date")
+        snapshot_date = get_latest_snapshot_in_range(
+            filters.date_start, filters.date_end, filters.hour_min, filters.hour_max
+        )
+        if not snapshot_date:
+            options = get_oos_filter_options()
+            snapshot_date = options.get("latest_snapshot_date")
         
     ref_df = get_all_pos()
     try:
         df = get_oos_listing(
             snapshot_date=snapshot_date,
+            date_start=filters.date_start,
+            date_end=filters.date_end,
             zone=filters.zone if filters.zone != "Toutes" else None,
             zone_sa=filters.zone_sa if filters.zone_sa != "Toutes" else None,
             territory=filters.territory if filters.territory != "Toutes" else None,
             cluster=filters.cluster if filters.cluster != "Tous" else None,
             segment_group=filters.segment_group if filters.segment_group != "Tous" else None,
+            hour_min=filters.hour_min,
+            hour_max=filters.hour_max,
         )
     except Exception as exc:
         return OosListingContext(is_empty=True, message=f"Erreur chargement OOS : {exc}")
@@ -488,12 +543,7 @@ def _build_listing_context_uncached(
         df = df[df["zone_sa"].astype(str).str.strip().str.upper() == target_sa]
 
     # ---------- 4. Filtre Heures ----------
-    if "last_trx_time" in df.columns and (filters.hour_min > 0 or filters.hour_max < 23):
-        try:
-            df["_hour"] = pd.to_datetime(df["last_trx_time"], errors="coerce").dt.hour
-            df = df[df["_hour"].between(filters.hour_min, filters.hour_max)].drop(columns=["_hour"])
-        except Exception:
-            pass
+    df = _filter_by_hour_range(df, filters)
 
     if df.empty:
         return OosListingContext(is_empty=True, message="Aucun POS en rupture pour ces filtres.")
@@ -582,39 +632,31 @@ def _compute_cluster_coverage(
 
 def _build_progression_from_listing_oos(filters: OosHvcFilters) -> pd.DataFrame:
     """
-    Serie horaire a partir de listing_oos (snapshots d'upload).
-    Taux OOS = nb POS en rupture / total referentiel * 100.
+    Série horaire à partir de listing_oos via agrégation SQLite directe.
+    Taux OOS = nb POS en rupture / total référentiel * 100.
     """
     try:
-        all_oos = get_oos_listing(
+        df_prog = get_oos_progression_series(
             zone=filters.zone if filters.zone != "Toutes" else None,
             territory=filters.territory if filters.territory != "Toutes" else None,
             cluster=filters.cluster if filters.cluster != "Tous" else None,
             segment_group=filters.segment_group if filters.segment_group not in ("Tous", "Toutes", "") else None,
+            date_start=filters.date_start,
+            date_end=filters.date_end,
+            hour_min=filters.hour_min,
+            hour_max=filters.hour_max,
         )
     except Exception:
         return pd.DataFrame()
 
-    if all_oos.empty or "snapshot_date" not in all_oos.columns:
+    if df_prog.empty:
         return pd.DataFrame()
 
-    # Enrichir zone_sa puis filtrer
-    if filters.zone_sa not in (None, "Toutes", ""):
-        ref_df = get_all_pos()
-        msisdn_ref = next((c for c in ["agent_msisdn", "msisdn"] if c in ref_df.columns), None)
-        zone_sa_col = next((c for c in ["zone_sa", "Zone_SA"] if c in ref_df.columns), None)
-        if msisdn_ref and zone_sa_col and "msisdn" in all_oos.columns:
-            ref_sa = (
-                ref_df[[msisdn_ref, zone_sa_col]]
-                .assign(**{msisdn_ref: ref_df[msisdn_ref].astype(str).str.strip()})
-                .rename(columns={msisdn_ref: "msisdn", zone_sa_col: "zone_sa"})
-                .drop_duplicates("msisdn")
-            )
-            all_oos["msisdn"] = all_oos["msisdn"].astype(str).str.strip()
-            all_oos = all_oos.merge(ref_sa, on="msisdn", how="left")
-            all_oos = all_oos[
-                all_oos["zone_sa"].astype(str).str.strip() == str(filters.zone_sa).strip()
-            ]
+    if filters.hour_min > 0 or filters.hour_max < 23:
+        try:
+            df_prog = df_prog[df_prog["h"].astype(int).between(filters.hour_min, filters.hour_max)].copy()
+        except Exception:
+            pass
 
     total_ref = get_pos_referentiel_count(
         zone=filters.zone if filters.zone not in ("Toutes", "") else None,
@@ -624,29 +666,15 @@ def _build_progression_from_listing_oos(filters: OosHvcFilters) -> pd.DataFrame:
         segment_group=filters.segment_group if filters.segment_group not in ("Tous", "Toutes", "") else None,
     ) or 1
 
-    # snapshot_date peut etre "YYYY-MM-DD" ou "YYYY-MM-DD HH:MM:SS"
-    ts = pd.to_datetime(all_oos["snapshot_date"], errors="coerce")
-    all_oos = all_oos.loc[ts.notna()].copy()
-    all_oos["_ts"] = ts
-    all_oos["date"] = ts.dt.strftime("%Y-%m-%d")
-    all_oos["hour"] = ts.dt.hour
+    df_prog["day_hvc"] = 0.0
+    df_prog["oos_pct"] = (df_prog["nb"] / total_ref * 100).round(1)
+    df_prog["nb_sites"] = df_prog["nb"]
+    df_prog["snapshot_timestamp"] = df_prog["d"] + " " + df_prog["h"].apply(lambda h: f"{int(h):02d}:00:00")
+    df_prog["date"] = df_prog["d"]
+    df_prog["hour"] = df_prog["h"]
+    df_prog["label"] = df_prog["d"].str.slice(8, 10) + "/" + df_prog["d"].str.slice(5, 7) + " " + df_prog["h"].apply(lambda h: f"{int(h):02d}h")
 
-    rows = []
-    for (d, h), grp in all_oos.groupby(["date", "hour"]):
-        nb = grp["msisdn"].nunique() if "msisdn" in grp.columns else len(grp)
-        rows.append({
-            "snapshot_timestamp": f"{d} {h:02d}:00:00",
-            "date": d,
-            "hour": int(h),
-            "day_hvc": 0.0,
-            "oos_pct": round(nb / total_ref * 100, 1),
-            "nb_sites": nb,
-            "label": f"{d[8:10]}/{d[5:7]} {h:02d}h",
-        })
-
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["date", "hour"]).reset_index(drop=True)
+    return df_prog[["snapshot_timestamp", "date", "hour", "day_hvc", "oos_pct", "nb_sites", "label"]].sort_values(["date", "hour"]).reset_index(drop=True)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _build_variation_context(filters: OosHvcFilters) -> HvcVariationContext:
@@ -832,31 +860,14 @@ def _get_hvc_msisdns() -> set:
 @st.cache_data(ttl=120, show_spinner=False)  # 2 minutes
 def build_hvc_frequently_oos(filters: OosHvcFilters, min_snapshots: int = 2) -> pd.DataFrame:
     try:
-        all_oos = get_oos_listing(
+        return get_hvc_frequently_oos_data(
             zone=filters.zone if filters.zone != "Toutes" else None,
             territory=filters.territory if filters.territory != "Toutes" else None,
             cluster=filters.cluster if filters.cluster != "Tous" else None,
+            min_snapshots=min_snapshots,
         )
     except Exception:
         return pd.DataFrame()
-
-    if all_oos.empty or "msisdn" not in all_oos.columns or "snapshot_date" not in all_oos.columns:
-        return pd.DataFrame()
-
-    lf = pl.from_pandas(all_oos).lazy()
-    if "segment_group" in all_oos.columns:
-        lf = lf.filter(pl.col("segment_group").cast(pl.Utf8).str.to_uppercase().str.contains("HVC"))
-
-    res = lf.group_by("msisdn").agg([
-        pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("nb_snapshots_oos"),
-        pl.col("oos_pct").cast(pl.Float64, strict=False).mean().round(1).alias("pct_oos_moy"),
-        pl.col("snapshot_date").max().alias("last_snapshot_date"),
-        pl.col("territory").first(),
-        pl.col("cluster").first(),
-        pl.col("segment_group").first(),
-    ]).filter(pl.col("nb_snapshots_oos") >= min_snapshots).sort(["nb_snapshots_oos", "pct_oos_moy"], descending=[True, True]).collect()
-
-    return res.to_pandas()
 
 def build_hvc_variation_only(
     filters: OosHvcFilters,
@@ -1209,12 +1220,18 @@ def get_oos_full_dataset(filters: OosHvcFilters) -> pd.DataFrame:
             territory=filters.territory if filters.territory != "Toutes" else None,
             cluster=filters.cluster if filters.cluster != "Tous" else None,
             segment_group=filters.segment_group if filters.segment_group != "Tous" else None,
+            hour_min=filters.hour_min,
+            hour_max=filters.hour_max,
         )
     except Exception:
         return pd.DataFrame()
 
     if df.empty or "msisdn" not in df.columns:
         return pd.DataFrame()
+
+    df = _filter_by_hour_range(df, filters)
+    if df.empty:
+        return df
 
     lf = pl.from_pandas(df).lazy()
     lf = lf.with_columns(pl.col("msisdn").cast(pl.Utf8).str.strip_chars())
@@ -1296,7 +1313,7 @@ def _format_hours_to_time_str(hours_float: float) -> str:
 
 @st.cache_data(ttl=120, show_spinner=False)  # 2 minutes — calcul Polars intensif
 def compute_commercial_ranking(df_full: pd.DataFrame) -> pd.DataFrame:
-    """Calcul du classement des commerciaux avec Polars."""
+    """Calcul du classement des commerciaux avec Polars (optimisé en mémoire)."""
     if df_full.empty or "msisdn" not in df_full.columns or "snapshot_date" not in df_full.columns:
         return pd.DataFrame(columns=[
             "Rang", "Commercial", "POS Uniques OOS", "Cumul Apparitions OOS",
@@ -1304,7 +1321,12 @@ def compute_commercial_ranking(df_full: pd.DataFrame) -> pd.DataFrame:
         ])
 
     unassigned = {"NON ATTRIBUÉ", "NON ATTRIBUE", "UNASSIGNED", "N/A", "NONE", "NAN", ""}
-    lf = pl.from_pandas(df_full).lazy()
+    needed_cols = ["msisdn", "snapshot_date"]
+    if "commercial" in df_full.columns:
+        needed_cols.append("commercial")
+
+    sub_df = df_full[needed_cols]
+    lf = pl.from_pandas(sub_df).lazy()
 
     if "commercial" in df_full.columns:
         lf = lf.filter(
@@ -1317,8 +1339,10 @@ def compute_commercial_ranking(df_full: pd.DataFrame) -> pd.DataFrame:
         pl.col("snapshot_date").str.slice(0, 10).alias("_day")
     ])
 
-    lf = lf.with_columns(
-        (pl.col("snapshot_date") == pl.col("snapshot_date").max().over("_day")).alias("is_last_snap")
+    # Évite le partitionnement coûteux over("_day") : join avec le max de snapshot_date par jour
+    max_day_snap = lf.group_by("_day").agg(pl.col("snapshot_date").max().alias("_max_snap"))
+    lf = lf.join(max_day_snap, on="_day", how="left").with_columns(
+        (pl.col("snapshot_date") == pl.col("_max_snap")).alias("is_last_snap")
     )
 
     pos_day = lf.group_by(["msisdn", "_day", "commercial"]).agg(
@@ -1422,9 +1446,9 @@ def compute_frequently_oos_metrics(
         pl.col("float_amount").cast(pl.Float64, strict=False).fill_null(0.0),
     ])
 
-    lf = lf.with_columns(
-        pl.col("snapshot_date").n_unique().over("_day").alias("total_day_snaps")
-    )
+    # Évite le partitionnement coûteux over("_day") : join avec le nombre de snapshots par jour
+    day_snaps_agg = lf.group_by("_day").agg(pl.col("snapshot_date").n_unique().alias("total_day_snaps"))
+    lf = lf.join(day_snaps_agg, on="_day", how="left")
 
     site_expr = pl.col("sitename").first().alias("site") if "sitename" in df_full.columns else pl.col("site").first().alias("site") if "site" in df_full.columns else pl.lit("N/A").alias("site")
     zone_sa_expr = pl.col("zone_sa").first() if "zone_sa" in df_full.columns else pl.lit("N/A").alias("zone_sa")
@@ -1455,7 +1479,6 @@ def compute_frequently_oos_metrics(
     all_snaps = sorted([s for s in df_full["snapshot_date"].dropna().unique()])
     total_snaps_count = len(all_snaps)
     latest_snap_dt = all_snaps[-1] if all_snaps else None
-    oos_pairs = set(zip(df_full["msisdn"].astype(str).str.strip(), df_full["snapshot_date"]))
 
     true_apps = lf.group_by("msisdn").agg([
         pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("total_apparitions")
@@ -1482,16 +1505,20 @@ def compute_frequently_oos_metrics(
         .alias("float_moyen_oos")
     ).collect()
 
-    def _calc_streak(m: str) -> int:
+    # Calcul de streak optimisé : vérifie seulement les 5 derniers snapshots récents
+    recent_check_snaps = list(reversed(all_snaps[-5:])) if len(all_snaps) >= 5 else list(reversed(all_snaps))
+    recent_oos_by_snap = {s: set(df_full.loc[df_full["snapshot_date"] == s, "msisdn"].astype(str).str.strip()) for s in recent_check_snaps}
+
+    def _calc_streak_fast(m: str) -> int:
         c = 0
-        for s in reversed(all_snaps):
-            if (m, s) in oos_pairs:
+        for s in recent_check_snaps:
+            if m in recent_oos_by_snap[s]:
                 c += 1
             else:
                 break
         return c
 
-    streaks = [_calc_streak(m) for m in pos_summary["msisdn"].to_list()]
+    streaks = [_calc_streak_fast(m) for m in pos_summary["msisdn"].to_list()]
 
     pos_summary = pos_summary.with_columns([
         pl.Series("streak", streaks, dtype=pl.Int64),
@@ -1554,37 +1581,39 @@ def compute_frequently_oos_metrics(
 
 
 def enrich_oos_with_history(df: pd.DataFrame, filters: Optional[OosHvcFilters] = None) -> pd.DataFrame:
-    """Enrichit un DataFrame de POS OOS avec les colonnes Rupture, Statut, Historique via Polars."""
+    """Enrichit un DataFrame de POS OOS avec les colonnes Rupture, Statut, Historique via requête ciblée."""
     if df is None or df.empty or "msisdn" not in df.columns:
         return df
 
     out = df.copy()
     out["msisdn"] = out["msisdn"].astype(str).str.strip()
+    msisdns = [m for m in out["msisdn"].unique() if m]
+    if not msisdns:
+        out["Rupture"] = 1
+        out["Statut"] = "Occasionnel"
+        out["Historique"] = "🟥"
+        return out
 
     try:
         date_start = filters.date_start if filters else None
         date_end = filters.date_end if filters else None
 
-        all_oos = get_oos_listing(date_start=date_start, date_end=date_end)
+        all_oos = get_oos_history_for_msisdns(msisdns, date_start=date_start, date_end=date_end)
         if not all_oos.empty and "msisdn" in all_oos.columns and "snapshot_date" in all_oos.columns:
             all_oos["msisdn"] = all_oos["msisdn"].astype(str).str.strip()
             recent_snaps = sorted([s for s in all_oos["snapshot_date"].unique() if s])
             total_snaps = len(recent_snaps)
             latest_snap = recent_snaps[-1] if recent_snaps else None
-            oos_pairs = set(zip(all_oos["msisdn"], all_oos["snapshot_date"]))
 
+            # Calculs ciblés par POS
+            recent_oos_by_snap = {s: set(all_oos.loc[all_oos["snapshot_date"] == s, "msisdn"]) for s in recent_snaps[-5:]}
             all_lf = pl.from_pandas(all_oos).lazy()
             all_lf = all_lf.with_columns(
                 pl.col("snapshot_date").str.slice(0, 10).alias("_day")
             )
 
-            # Daily counts
-            pos_daily_counts = all_lf.group_by(["msisdn", "_day"]).agg(
-                pl.len().alias("daily_app")
-            )
-            pos_avg_daily = pos_daily_counts.group_by("msisdn").agg(
-                pl.col("daily_app").mean().alias("avg_daily_app")
-            )
+            pos_daily_counts = all_lf.group_by(["msisdn", "_day"]).agg(pl.len().alias("daily_app"))
+            pos_avg_daily = pos_daily_counts.group_by("msisdn").agg(pl.col("daily_app").mean().alias("avg_daily_app"))
 
             grp = all_lf.group_by("msisdn").agg([
                 pl.coalesce([pl.col("last_trx_time"), pl.col("snapshot_date")]).n_unique().alias("rupture_count"),
@@ -1595,17 +1624,17 @@ def enrich_oos_with_history(df: pd.DataFrame, filters: Optional[OosHvcFilters] =
                 (pl.col("rupture_count") / max(1, total_snaps) * 100.0).alias("pct_oos")
             ).collect()
 
-            def _get_streak(m: str) -> int:
-                s_count = 0
-                clean_m = str(m).strip()
-                for s in reversed(recent_snaps):
-                    if (clean_m, s) in oos_pairs:
-                        s_count += 1
+            recent_check = list(reversed(recent_snaps[-5:]))
+            def _get_streak_fast(m: str) -> int:
+                c = 0
+                for s in recent_check:
+                    if m in recent_oos_by_snap.get(s, set()):
+                        c += 1
                     else:
                         break
-                return s_count
+                return c
 
-            streaks = [_get_streak(m) for m in grp["msisdn"].to_list()]
+            streaks = [_get_streak_fast(m) for m in grp["msisdn"].to_list()]
             grp = grp.with_columns(pl.Series("streak", streaks, dtype=pl.Int64))
 
             grp = grp.with_columns(
@@ -1629,10 +1658,14 @@ def enrich_oos_with_history(df: pd.DataFrame, filters: Optional[OosHvcFilters] =
                 .alias("statut_calc")
             )
 
-            def _build_hist(m: str) -> str:
-                return " ".join(["🟥" if (m, s) in oos_pairs else "🟩" for s in recent_snaps])
+            # Historique visuel sur les 10 derniers snapshots max pour éviter les carrés infinis
+            display_snaps = recent_snaps[-10:] if len(recent_snaps) > 10 else recent_snaps
+            snap_pos_map = {s: set(all_oos.loc[all_oos["snapshot_date"] == s, "msisdn"]) for s in display_snaps}
 
-            hist_map = {m: _build_hist(m) for m in out["msisdn"].unique()}
+            def _build_hist_fast(m: str) -> str:
+                return " ".join(["🟥" if m in snap_pos_map[s] else "🟩" for s in display_snaps])
+
+            hist_map = {m: _build_hist_fast(m) for m in out["msisdn"].unique()}
             grp_df = grp.to_pandas()
             stat_map = dict(zip(grp_df["msisdn"], grp_df["statut_calc"]))
             rup_map = dict(zip(grp_df["msisdn"], grp_df["rupture_count"]))
@@ -1648,5 +1681,7 @@ def enrich_oos_with_history(df: pd.DataFrame, filters: Optional[OosHvcFilters] =
         out["Rupture"] = 1
         out["Statut"] = "Occasionnel"
         out["Historique"] = "🟥"
+
+    return out
 
     return out

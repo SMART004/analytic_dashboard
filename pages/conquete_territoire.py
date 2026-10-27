@@ -1519,11 +1519,11 @@ def render_couverture_portefeuille_commercial(
 
     styled = (
         df.style
-        .applymap(_color_couverture, subset=["Taux couverture (%)"])  # ← coloration seuils
+        .map(_color_couverture, subset=["Taux couverture (%)"])  # ← coloration seuils
         .format({k: v for k, v in fmt.items() if k in df.columns})
     )
 
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
     st.divider()
 

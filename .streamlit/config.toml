@@ -9,3 +9,4 @@ fileWatcherType = "none"
 
 [client]
 showErrorDetails = false
+toolbarMode = "minimal"
